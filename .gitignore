@@ -10,3 +10,7 @@ __pycache__/
 
 # Journal database
 journal.db*
+
+# Runtime logs
+bot.log
+bot.err.log
