@@ -1,0 +1,12 @@
+# Virtual environment
+.venv/
+
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Journal database
+journal.db*
