@@ -4,7 +4,7 @@ import logging
 import os
 from pathlib import Path
 
-from telegram import Update
+from telegram import BotCommand, MenuButtonCommands, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 import db
@@ -15,6 +15,12 @@ BOT_DIR = Path(__file__).resolve().parent
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(name)s - %(message)s",
     level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        # Console output disappears with the window — everything (including
+        # tracebacks) must also land in bot.log so bugs stay diagnosable.
+        logging.FileHandler(BOT_DIR / "bot.log", encoding="utf-8"),
+    ],
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -40,26 +46,33 @@ def get_token() -> str:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         raise SystemExit(
-            "Bot token not found.\n"
-            "Set the TELEGRAM_BOT_TOKEN environment variable or create a .env "
-            "file with TELEGRAM_BOT_TOKEN=your-token (get a token from "
-            "@BotFather on Telegram)."
+            "توکن ربات پیدا نشد.\n"
+            "متغیر محیطی TELEGRAM_BOT_TOKEN را تنظیم کنید یا فایل .env بسازید "
+            "و داخل آن TELEGRAM_BOT_TOKEN=توکن‌شما را بگذارید "
+            "(توکن را از @BotFather در تلگرام بگیرید)."
         )
     return token
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send the command overview when the /start command is issued."""
-    await update.message.reply_text(
-        "Trading Journal\n\n"
-        "/trade — log a closed trade\n"
-        "/recent — last 10 trades\n"
-        "/stats — overall performance\n"
-        "/delete <id> — delete a trade, e.g. /delete 12\n\n"
-        "Inside /trade you'll get buttons for choices (long/short, auto P&L, "
-        "today's date, skip notes, save/discard); type values where asked.\n"
-        "Send /cancel to abort."
-    )
+# The '/' commands shown when the ☰ menu button next to the message bar is
+# tapped (registered with setMyCommands on startup).
+BOT_COMMANDS = [
+    BotCommand("start", "🏠 منوی اصلی"),
+    BotCommand("help", "❓ راهنمای استفاده از ربات"),
+    BotCommand("trade", "📈 ثبت معامله بسته‌شده"),
+    BotCommand("recent", "🕘 معاملات اخیر — هر معامله یک دکمه، جزئیات کامل و حذف"),
+    BotCommand("stats", "📊 آمار — فیلتر بازه و نماد (دکمه‌های داخل پیام)"),
+    BotCommand("export", "📥 دانلود همه معاملات به‌صورت اکسل"),
+    BotCommand("delete", "🗑 حذف یک معامله با شماره"),
+    BotCommand("cancel", "✖️ لغو ثبت جاری"),
+]
+
+
+async def post_init(app: Application) -> None:
+    """Register the menu-button command list before polling starts."""
+    await app.bot.set_my_commands(BOT_COMMANDS)
+    await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    logger.info("Menu commands registered (%s commands).", len(BOT_COMMANDS))
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -69,10 +82,21 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def main() -> None:
     db.init_db()
-    app = Application.builder().token(get_token()).build()
-    app.add_handler(CommandHandler("start", start))
+    app = (
+        Application.builder()
+        .token(get_token())
+        .post_init(post_init)
+        .build()
+    )
+    app.add_handler(CommandHandler("start", journal.show_menu))
+    app.add_handler(CommandHandler("help", journal.show_menu))
     app.add_handler(journal.build_conversation())
+    for handler in journal.build_menu_handlers():
+        app.add_handler(handler)
+    app.add_handler(journal.build_stats_callbacks())
+    app.add_handler(journal.build_recent_callbacks())
     app.add_handler(CommandHandler("recent", journal.recent))
+    app.add_handler(CommandHandler("export", journal.export_trades))
     app.add_handler(CommandHandler("stats", journal.stats))
     app.add_handler(CommandHandler("delete", journal.delete_cmd))
     app.add_error_handler(on_error)

@@ -11,6 +11,12 @@ __pycache__/
 # Journal database
 journal.db*
 
+# Downloaded chart screenshots
+screenshots/
+
+# Spreadsheet exports (generated on demand)
+exports/
+
 # Runtime logs
 bot.log
 bot.err.log
