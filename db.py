@@ -16,6 +16,9 @@ from typing import Any, Optional
 DB_PATH = Path(
     os.getenv("JOURNAL_DB", str(Path(__file__).resolve().parent / "journal.db"))
 )
+# On hosts like Railway the DB may point into a mounted volume whose
+# subdirectories do not exist yet — create them, or sqlite3.connect fails.
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS trades (

@@ -167,6 +167,59 @@ Override the folder with the `SCREENSHOT_DIR` environment variable.
 
 Then open your bot in Telegram and send `/trade` to log your first closed trade.
 
+## Deploy to Railway
+
+Railway runs the bot as a long-polling worker (no web port needed). Because
+Railway's container filesystem is wiped on every deploy, attach a **Volume**
+for `journal.db` and the screenshots.
+
+1. Install the CLI and log in:
+
+   ```powershell
+   npm i -g @railway/cli
+   railway login
+   ```
+
+2. Create a project and link this folder to it:
+
+   ```powershell
+   railway init          # or: railway link for an existing project
+   ```
+
+3. In the Railway dashboard, open your service → **Volume** → attach one and
+   set the **mount path** to `/data`.
+
+4. Add these **Variables** to the service (never commit the real token):
+
+   | Variable | Value |
+   | --- | --- |
+   | `TELEGRAM_BOT_TOKEN` | your token from @BotFather |
+   | `JOURNAL_DB` | `/data/journal.db` |
+   | `SCREENSHOT_DIR` | `/data/screenshots` |
+   | `EXPORT_DIR` | `/data/exports` |
+
+5. Deploy — either push to GitHub (if you connected the repo) or from this
+   folder:
+
+   ```powershell
+   railway up
+   ```
+
+   The `railway.json` file tells Railway to start the bot with `python bot.py`
+   and to restart it if it crashes. Watch it with `railway logs`.
+
+6. To carry your existing local history over, upload `journal.db` (and the
+   `screenshots/` files) into the volume:
+
+   ```powershell
+   railway ssh -- mkdir -p /data/screenshots
+   railway ssh -- scp local:C:/Users/Astrix/Dev/trading/journal.db /data/journal.db
+   railway ssh -- scp -r local:C:/Users/Astrix/Dev/trading/screenshots/. /data/screenshots/
+   ```
+
+   (`railway volume files put journal.db /data/` works too. `railway ssh`
+   requires a one-time invite link shown by `railway ssh --`.)
+
 ## Test
 
 An offline smoke test covers the whole `/trade` flow (reply-keyboard buttons,
