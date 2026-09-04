@@ -1,6 +1,8 @@
 # Telegram Trading Journal
 
-A personal Telegram bot that logs closed trades into a local SQLite database.
+A personal Telegram bot that logs closed trades into a local SQLite database —
+and also tracks **open trades**: register a position when you enter it, close
+it through the bot later, and it moves into your history.
 
 ## Language / زبان
 
@@ -21,6 +23,8 @@ data and the spreadsheet column layout keep working.
 | --- | --- |
 | `/trade` | Guided entry: بازار (🪙 کریپتو / 💵 فارکس) -> symbol (recent / most-used as buttons) -> 📈 Long / 📉 Short -> Leverage (skippable) -> timeframe -> Entry -> 🎯 Take Profit -> 🛑 Stop Loss -> نتیجه (✅ Win / ❌ Loss / ➖ BE) -> 💰 Margin -> ⚠️ Risk % (skippable) -> date (📅 امروز) -> hour -> دلیل ورود -> Mood -> 📸 screenshot before -> 📸 screenshot after -> ✅ ذخیره / ❌ ثبت نشود. **P&L and ROI are calculated automatically** from margin × leverage × price move — the trader is never asked |
 | `/recent` | Paginated **inline panel** — **one button per trade** (result emoji + id + pair + P&L, 📷 if screenshots) with ◀️/▶️ paging, an All/1W/1M range filter, and a 🏠 Home button. Tapping a trade **sends a separate, airy detail message** (all fields with bullets, emoji labels and blank lines) carrying 📷 عکس چارت (only when the trade has screenshots — re-sends the before/after photos) + 🗑 Delete + ❌ Close; deleting confirms on the detail and refreshes the panel |
+| `/open` | 🟢 **Open trades panel** — one button per running position (entry price + 📷 mark) with ◀️/▶️ paging, **➕ ثبت معامله باز** to start the questionnaire, and 🏠 Home. Tapping a trade sends its detail card; with no open trades the questionnaire starts automatically |
+| `/close <id>` | 🏁 Close an open trade (same flow as the 🏁 button on its detail card): status (✅ Win/TP · ❌ Loss/SL · ➖ BE · ✏️ Manual exit) → exit date → exit time → exit price (**auto-filled** for TP/SL/BE) → up to **4 exit screenshots** → دلیل خروج → Mood → confirm; the trade then moves into the normal history, `/recent` and `/stats` |
 | `/stats` | Filterable performance panel with **inline buttons attached to the message** (period, symbol, reset, export); `/stats BTCUSD 1w` style arguments still work |
 | `/delete <id>` | Delete a trade, e.g. `/delete 12` |
 | `/export` | Download all trades as an `.xlsx` spreadsheet |
@@ -67,9 +71,10 @@ prices, margin, custom date, notes).
   every command with a short emoji explanation. It is registered
   automatically when the bot starts (`set_my_commands`).
 - `/start`, `/help` or the 🏠 منو button send the **main-menu keyboard** —
-  persistent buttons under the input bar: 📈 معامله جدید · 📊 آمار /
-  🕘 معاملات اخیر · 📥 اکسل / 🏠 منو. Tapping one runs the matching command;
-  📈 معامله جدید safely restarts the questionnaire even mid-entry. The bar is
+  persistent buttons under the input bar: 📈 معامله جدید · 🟢 معاملات باز /
+  📊 آمار · 🕘 معاملات اخیر / 📥 اکسل · 🏠 منو. Tapping one runs the matching
+  command; 📈 معامله جدید and 🟢 معاملات باز safely restart their
+  questionnaires even mid-entry. The bar is
   re-sent after saving, discarding or cancelling an entry, so the buttons
   never disappear (no `/start` needed).
 
@@ -132,12 +137,46 @@ such a trade carries a **📷 عکس چارت** button that re-sends them (capti
 قبل/بعد). `/delete` removes the files.
 Override the folder with the `SCREENSHOT_DIR` environment variable.
 
+## Open trades (two-phase journaling)
+
+The 🟢 معاملات باز button (or `/open`) opens a panel styled exactly like
+`/recent`: one button per running position (entry price + 📷 mark), an
+**➕ ثبت معامله باز** button on top, ◀️/▶️ paging and 🏠 Home. Tapping a trade
+sends its detail card — entry, TP, SL, risk, date/time, entry reason and a
+📷 button for the entry chart — carrying **🏁 Close trade**, 🗑 حذف and
+❌ بستن.
+
+- **Phase 1 — register:** press **➕ ثبت معامله باز** on the 🟢 panel (or tap
+  🟢 when nothing is open). The questionnaire asks بازار، نماد، جهت،
+  تایم‌فریم، دلیل ورود، 📸 اسکرین‌شات ورود (اختیاری)، تاریخ ورود، ساعت ورود،
+  ⚠️ Risk، Entry، 🎯 TP و 🛑 SL — in that order — then shows the confirmation
+  summary and saves the position to «معاملات باز».
+- **Phase 2 — close:** later, tap the trade in the 🟢 panel and press
+  **🏁 Close trade** (or send `/close <id>`). The bot asks the status
+  (✅ Win/TP · ❌ Loss/SL · ➖ BE · ✏️ Manual exit), the exit date and the exit
+  time as two separate questions, then the exit price — **auto-filled from
+  TP/SL/entry for the first three statuses** — up to **4 exit screenshots**
+  (one per message, skippable), the reason for exiting and the mood. After
+  the confirmation the position leaves the open list and appears in
+  `/recent`, `/stats` and the Excel export.
+
+Because the close questionnaire has no margin question, P&L for these trades
+is stored as *unknown* (NULL — never a fake 0): the stats panel still counts
+them as Win/Loss/BE from the status and the price direction, and `/recent`
+shows «—» instead of a made-up dollar amount. The 🗑 button deletes an open
+trade (and its screenshots) without ever touching the history.
+
 ## Data
 
 - Trades are stored in `journal.db` (SQLite, WAL mode) next to `bot.py`.
 - Override the location with the `JOURNAL_DB` environment variable.
+- Open positions live in a separate `open_trades` table; closing one copies it
+  into `trades` with the exit answers and removes it from the open list.
 - Databases created before the timeframe/screenshot update are migrated
-  automatically on startup (new columns, existing rows keep working).
+  automatically on startup (new columns, existing rows keep working). Databases
+  from before the open-trades update are migrated too: the new columns are
+  added, P&L/margin become nullable for open-flow closes, and the
+  `open_trades` table is created.
 - `journal.db` and `screenshots/` are git-ignored — back them up like any
   personal data.
 
@@ -222,10 +261,10 @@ for `journal.db` and the screenshots.
 
 ## Test
 
-An offline smoke test covers the whole `/trade` flow (reply-keyboard buttons,
-typed fallbacks, timeframe parsing, screenshot handling, PTB routing, database
-writes, migration). It uses a throwaway database and temp folder, so it is
-safe to run anytime:
+An offline smoke test covers the whole `/trade`, `/open` and `/close` flows
+(reply-keyboard buttons, typed fallbacks, timeframe parsing, screenshot
+handling, PTB routing, database writes, migration). It uses a throwaway
+database and temp folder, so it is safe to run anytime:
 
 ```powershell
 .\.venv\Scripts\python.exe smoke_test.py
@@ -234,9 +273,10 @@ safe to run anytime:
 ## Project layout
 
 - `bot.py` — entry point: env loading, logging, handler wiring
-- `journal.py` — the `/trade` conversation plus `/recent`, `/stats`,
-  `/delete`
-- `db.py` — SQLite storage (schema + migration, insert/delete/list, stats)
+- `journal.py` — the `/trade`, `/open` and `/close` conversations plus the 🟢
+  open-trades panel, `/recent`, `/stats`, `/delete`
+- `db.py` — SQLite storage (schema + migration, open trades, insert/delete/
+  list, stats)
 - `export.py` — spreadsheet export used by `/export` (openpyxl)
 - `smoke_test.py` — offline checks for the `/trade` flow (no Telegram needed)
 - `screenshots/` — downloaded chart screenshots (created on demand)

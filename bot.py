@@ -60,6 +60,7 @@ BOT_COMMANDS = [
     BotCommand("start", "🏠 منوی اصلی"),
     BotCommand("help", "❓ راهنمای استفاده از ربات"),
     BotCommand("trade", "📈 ثبت معامله بسته‌شده"),
+    BotCommand("open", "🟢 ثبت معامله باز / بستن معامله‌های باز"),
     BotCommand("recent", "🕘 معاملات اخیر — هر معامله یک دکمه، جزئیات کامل و حذف"),
     BotCommand("stats", "📊 آمار — فیلتر بازه و نماد (دکمه‌های داخل پیام)"),
     BotCommand("export", "📥 دانلود همه معاملات به‌صورت اکسل"),
@@ -91,11 +92,15 @@ def main() -> None:
     app.add_handler(CommandHandler("start", journal.show_menu))
     app.add_handler(CommandHandler("help", journal.show_menu))
     app.add_handler(journal.build_conversation())
+    app.add_handler(journal.build_open_conversation())
+    app.add_handler(journal.build_close_conversation())
     for handler in journal.build_menu_handlers():
         app.add_handler(handler)
     app.add_handler(journal.build_stats_callbacks())
     app.add_handler(journal.build_recent_callbacks())
+    app.add_handler(journal.build_open_callbacks())
     app.add_handler(CommandHandler("recent", journal.recent))
+    app.add_handler(CommandHandler("open", journal.open_trades))
     app.add_handler(CommandHandler("export", journal.export_trades))
     app.add_handler(CommandHandler("stats", journal.stats))
     app.add_handler(CommandHandler("delete", journal.delete_cmd))

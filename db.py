@@ -8,10 +8,13 @@ handlers.
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = Path(
     os.getenv("JOURNAL_DB", str(Path(__file__).resolve().parent / "journal.db"))
@@ -38,6 +41,23 @@ CREATE TABLE IF NOT EXISTS trades (
     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_trades_date ON trades (trade_date);
+CREATE TABLE IF NOT EXISTS open_trades (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol       TEXT    NOT NULL,
+    direction    TEXT    NOT NULL CHECK (direction IN ('long', 'short')),
+    market       TEXT    NOT NULL DEFAULT 'crypto',
+    timeframe    TEXT    NOT NULL DEFAULT '',
+    reason       TEXT    NOT NULL DEFAULT '',
+    screenshot   TEXT,
+    trade_date   TEXT    NOT NULL,
+    entry_time   TEXT    NOT NULL DEFAULT '',
+    risk_percent REAL,
+    entry_price  REAL    NOT NULL,
+    take_profit  REAL,
+    stop_loss    REAL,
+    created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_open_trades_date ON open_trades (trade_date);
 """
 
 # Columns added after the first release; init_db() ALTERs older databases so
@@ -56,6 +76,20 @@ _NEW_COLUMNS = {
     # Return on investment in percent (P&L / margin * 100). Legacy rows stay
     # NULL; the UI falls back to computing it from pnl/size when needed.
     "roi": "REAL",
+    # --- open-trade flow (tracked in open_trades, merged on close) -----------
+    # Time part of the entry ("HH:MM"); the date part lives in trade_date.
+    "entry_time": "TEXT NOT NULL DEFAULT ''",
+    # Time part of the exit ("HH:MM").
+    "exit_time": "TEXT NOT NULL DEFAULT ''",
+    # Why the position was opened. The close flow stores the EXIT reason in
+    # `notes`; legacy rows keep their (entry) reason only in `notes`.
+    "entry_reason": "TEXT NOT NULL DEFAULT ''",
+    "exit_reason": "TEXT NOT NULL DEFAULT ''",
+    # Exit chart screenshots — one filename per line (up to 4). Legacy rows
+    # keep their single after-shot in `screenshot_after`.
+    "exit_photos": "TEXT",
+    # 'closed' = logged directly via /trade; 'open' = closed from open_trades.
+    "source": "TEXT NOT NULL DEFAULT 'closed'",
 }
 
 
@@ -64,6 +98,56 @@ def _connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
+
+
+def _column_ddl(
+    row: sqlite3.Row,
+    drop_notnull: set[str] = frozenset(),
+    autoinc: bool = False,
+) -> str:
+    """Rebuild one column's DDL from PRAGMA table_info (for _relax_trades)."""
+    notnull = 0 if row["name"] in drop_notnull else row["notnull"]
+    parts = [f'"{row["name"]}"', row["type"] or "TEXT"]
+    if row["pk"]:
+        # PRAGMA does not report AUTOINCREMENT — _relax_trades passes it.
+        parts.append("PRIMARY KEY" + (" AUTOINCREMENT" if autoinc else ""))
+    if notnull:
+        parts.append("NOT NULL")
+    if row["dflt_value"] is not None:
+        # DEFAULT (expr) — parens are required around expressions and PRAGMA
+        # strips the original ones, so always re-wrap (literals are fine too).
+        parts.append(f"DEFAULT ({row['dflt_value']})")
+    return " ".join(parts)
+
+
+def _relax_trades(conn: sqlite3.Connection) -> None:
+    """Allow NULL pnl/size in `trades` (table rebuild — SQLite cannot ALTER).
+
+    Trades closed from the open-trades flow have no margin in their
+    questionnaire, so their P&L is genuinely unknown: it must stay NULL
+    rather than a fake 0 that would pollute win/loss statistics.
+    """
+    info = list(conn.execute("PRAGMA table_info(trades)"))
+    by_name = {row["name"]: row for row in info}
+    if not (by_name["pnl"]["notnull"] or by_name["size"]["notnull"]):
+        return
+    master = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'trades'"
+    ).fetchone()
+    autoinc = bool(master and master["sql"] and "AUTOINCREMENT" in master["sql"])
+    ddl = ", ".join(
+        _column_ddl(row, {"pnl", "size"}, autoinc=autoinc and row["name"] == "id")
+        for row in info
+    )
+    names = ", ".join(f'"{row["name"]}"' for row in info)
+    conn.executescript(
+        "CREATE TABLE trades_migrating (" + ddl + ");"
+        f"INSERT INTO trades_migrating ({names}) SELECT {names} FROM trades;"
+        "DROP TABLE trades;"
+        "ALTER TABLE trades_migrating RENAME TO trades;"
+        "CREATE INDEX IF NOT EXISTS idx_trades_date ON trades (trade_date);"
+    )
+    logger.info("trades table rebuilt: pnl/size are now nullable")
 
 
 def init_db() -> None:
@@ -75,6 +159,7 @@ def init_db() -> None:
         for name, decl in _NEW_COLUMNS.items():
             if name not in existing:
                 conn.execute(f"ALTER TABLE trades ADD COLUMN {name} {decl}")
+        _relax_trades(conn)
         conn.commit()
     finally:
         conn.close()
@@ -87,8 +172,8 @@ def add_trade(
     timeframe: str,
     entry_price: float,
     exit_price: float,
-    size: float,
-    pnl: float,
+    size: Optional[float],
+    pnl: Optional[float],
     trade_date: str,
     notes: str,
     mood: str,
@@ -105,7 +190,9 @@ def add_trade(
     """Insert a closed trade and return its id.
 
     exit_price is the price that actually closed the trade (the TP or SL that
-    hit); size is the margin the trader committed; hit is 'tp' or 'sl'.
+    hit); size is the margin the trader committed (None for trades closed from
+    the open-trades flow, which has no margin question — pnl stays NULL too);
+    hit is 'tp', 'sl', 'win', 'lose', 'be' or 'manual'.
     roi is the return on investment in percent (P&L / margin * 100).
     """
     conn = _connect()
@@ -221,6 +308,171 @@ def delete_trade(trade_id: int) -> Optional[sqlite3.Row]:
         conn.close()
 
 
+def add_open_trade(
+    *,
+    symbol: str,
+    direction: str,
+    market: str,
+    timeframe: str,
+    reason: str,
+    screenshot: Optional[str],
+    trade_date: str,
+    entry_time: str,
+    risk_percent: Optional[float],
+    entry_price: float,
+    take_profit: Optional[float],
+    stop_loss: Optional[float],
+) -> int:
+    """Insert an open (running) trade and return its id."""
+    conn = _connect()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO open_trades"
+            " (symbol, direction, market, timeframe, reason, screenshot,"
+            "  trade_date, entry_time, risk_percent, entry_price,"
+            "  take_profit, stop_loss)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                symbol,
+                direction,
+                market,
+                timeframe,
+                reason,
+                screenshot,
+                trade_date,
+                entry_time,
+                risk_percent,
+                entry_price,
+                take_profit,
+                stop_loss,
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+    finally:
+        conn.close()
+
+
+def get_open_trade(open_id: int) -> Optional[sqlite3.Row]:
+    """Return a single open trade by id, or None if it does not exist."""
+    conn = _connect()
+    try:
+        return conn.execute(
+            "SELECT * FROM open_trades WHERE id = ?", (open_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def get_open_trades(
+    limit: int = 10, offset: int = 0
+) -> list[sqlite3.Row]:
+    """Open trades, newest first (powers the 🟢 panel's paging)."""
+    conn = _connect()
+    try:
+        return conn.execute(
+            "SELECT * FROM open_trades ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def count_open_trades() -> int:
+    """Number of currently open trades."""
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM open_trades").fetchone()
+        return int(row[0])
+    finally:
+        conn.close()
+
+
+def close_open_trade(
+    open_id: int,
+    *,
+    hit: str,
+    exit_price: float,
+    trade_date: str,
+    exit_time: str,
+    notes: str,
+    mood: str,
+    exit_photos: Optional[str],
+    screenshot_after: Optional[str],
+) -> Optional[int]:
+    """Move an open trade into the closed `trades` list and return the new id.
+
+    The open questionnaire has no margin question, so size/pnl/roi are stored
+    as NULL (never a fake 0) — the stats panel classifies win/loss/BE from
+    `hit` and the price direction for such rows.
+    """
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM open_trades WHERE id = ?", (open_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        cursor = conn.execute(
+            "INSERT INTO trades"
+            " (symbol, direction, timeframe, entry_price, exit_price, size,"
+            "  pnl, roi, trade_date, notes, mood, screenshot, market,"
+            "  risk_percent, take_profit, stop_loss, hit, screenshot_after,"
+            "  entry_time, exit_time, entry_reason, exit_reason, exit_photos,"
+            "  source)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+            "         ?, ?, ?, ?, ?, ?)",
+            (
+                row["symbol"],
+                row["direction"],
+                row["timeframe"],
+                row["entry_price"],
+                exit_price,
+                None,  # size — unknown (no margin question)
+                None,  # pnl  — unknown (no margin to compute it from)
+                None,  # roi
+                trade_date,
+                notes,  # the exit reason lives in `notes`
+                mood,
+                row["screenshot"],
+                row["market"],
+                row["risk_percent"],
+                row["take_profit"],
+                row["stop_loss"],
+                hit,
+                screenshot_after,
+                row["entry_time"],
+                exit_time,
+                row["reason"],
+                notes,
+                exit_photos,
+                "open",
+            ),
+        )
+        new_id = int(cursor.lastrowid)
+        conn.execute("DELETE FROM open_trades WHERE id = ?", (open_id,))
+        conn.commit()
+        return new_id
+    finally:
+        conn.close()
+
+
+def delete_open_trade(open_id: int) -> Optional[sqlite3.Row]:
+    """Delete an open trade by id and return the row that was removed."""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM open_trades WHERE id = ?", (open_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute("DELETE FROM open_trades WHERE id = ?", (open_id,))
+        conn.commit()
+        return row
+    finally:
+        conn.close()
+
+
 def get_symbol_suggestions(
     recent_limit: int = 4, top_limit: int = 4
 ) -> tuple[list[str], list[str]]:
@@ -277,6 +529,19 @@ def get_stats(
     symbol — only trades of this symbol (case-insensitive);
     since — only trades on/after this YYYY-MM-DD date string.
     """
+    # Trades closed from the open-trades flow have no margin, so their P&L is
+    # NULL: classify win/loss/BE from `hit` and the price direction instead.
+    _hit_win = (
+        "hit IN ('tp', 'win')"
+        " OR (hit = 'manual' AND ((direction = 'long' AND exit_price > entry_price)"
+        " OR (direction = 'short' AND exit_price < entry_price)))"
+    )
+    _hit_loss = (
+        "hit IN ('sl', 'lose')"
+        " OR (hit = 'manual' AND ((direction = 'long' AND exit_price < entry_price)"
+        " OR (direction = 'short' AND exit_price > entry_price)))"
+    )
+    _hit_be = "hit = 'be' OR (hit = 'manual' AND exit_price = entry_price)"
     conn = _connect()
     try:
         clauses, params = [], []
@@ -290,9 +555,12 @@ def get_stats(
         row = conn.execute(
             "SELECT COUNT(*) AS trades,"
             " SUM(pnl) AS total,"
-            " SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,"
-            " SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) AS losses,"
-            " SUM(CASE WHEN pnl = 0 THEN 1 ELSE 0 END) AS be,"
+            " SUM(CASE WHEN pnl > 0 THEN 1"
+            f" WHEN pnl IS NULL AND ({_hit_win}) THEN 1 ELSE 0 END) AS wins,"
+            " SUM(CASE WHEN pnl < 0 THEN 1"
+            f" WHEN pnl IS NULL AND ({_hit_loss}) THEN 1 ELSE 0 END) AS losses,"
+            " SUM(CASE WHEN pnl = 0 THEN 1"
+            f" WHEN pnl IS NULL AND ({_hit_be}) THEN 1 ELSE 0 END) AS be,"
             " AVG(CASE WHEN pnl > 0 THEN pnl END) AS avg_win,"
             " AVG(CASE WHEN pnl < 0 THEN pnl END) AS avg_loss,"
             " AVG(roi) AS avg_roi,"

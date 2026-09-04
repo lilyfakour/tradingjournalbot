@@ -155,7 +155,14 @@ def _inline_flat(markup):
 
 
 def _home_labels():
-    return ["📈 معامله جدید", "📊 آمار", "🕘 معاملات اخیر", "📥 اکسل", "🏠 منو"]
+    return [
+        "📈 معامله جدید",
+        "🟢 معاملات باز",
+        "📊 آمار",
+        "🕘 معاملات اخیر",
+        "📥 اکسل",
+        "🏠 منو",
+    ]
 
 
 def _last_markup(upd):
@@ -210,8 +217,29 @@ async def main() -> int:
         and "take_profit" in cols
         and "stop_loss" in cols
         and "hit" in cols
-        and "screenshot_after" in cols,
-        "new database has all columns (market/leverage/risk/tp/sl/hit/2 shots)",
+        and "screenshot_after" in cols
+        and "entry_time" in cols
+        and "exit_time" in cols
+        and "entry_reason" in cols
+        and "exit_reason" in cols
+        and "exit_photos" in cols
+        and "source" in cols,
+        "new database has all columns (open-flow + legacy)",
+    )
+    open_cols = {
+        r[1]
+        for r in sqlite3.connect(os.environ["JOURNAL_DB"]).execute(
+            "PRAGMA table_info(open_trades)"
+        )
+    }
+    check(
+        {
+            "symbol", "direction", "market", "timeframe", "reason",
+            "screenshot", "trade_date", "entry_time", "risk_percent",
+            "entry_price", "take_profit", "stop_loss",
+        }
+        <= open_cols,
+        "open_trades table has every open-questionnaire column",
     )
 
     # --- migration: an old-schema database gains the new columns -------------
@@ -240,6 +268,18 @@ async def main() -> int:
         "timeframe" in cols and "mood" in cols and "screenshot" in cols
         and "market" in cols and "hit" in cols,
         "init_db migrates old databases",
+    )
+    notnull = {
+        r[1]: r[3]
+        for r in sqlite3.connect(old_db).execute("PRAGMA table_info(trades)")
+    }
+    check(
+        notnull["pnl"] == 0 and notnull["size"] == 0,
+        "init_db relaxes pnl/size to nullable (open-flow closes have no margin)",
+    )
+    check(
+        "entry_time" in cols and "exit_photos" in cols and "source" in cols,
+        "init_db adds the open-flow columns to old databases",
     )
     db.DB_PATH = real_db_path
 
@@ -673,6 +713,101 @@ async def main() -> int:
         "first trade stored with market/hit/leverage/risk + auto P&L/ROI",
     )
 
+    # --- 🟢 open trades: add questionnaire, panel, callbacks --------------------
+    octx = FakeContext()
+    state = await journal.open_trade_start(upd.text("/open"), octx)
+    check(state == journal.OPEN_MARKET, "/open starts at OPEN_MARKET")
+    state = await journal.ask_open_market(upd.text("🪙 کریپتو"), octx)
+    check(
+        state == journal.OPEN_SYMBOL and octx.user_data["market"] == "crypto",
+        "open: market -> OPEN_SYMBOL",
+    )
+    state = await journal.ask_open_symbol(upd.text("xauusd"), octx)
+    check(
+        state == journal.OPEN_DIRECTION and octx.user_data["symbol"] == "XAUUSD",
+        "open: symbol uppercased -> OPEN_DIRECTION",
+    )
+    state = await journal.ask_open_direction(upd.text("📈 Long"), octx)
+    check(
+        state == journal.OPEN_TIMEFRAME and octx.user_data["direction"] == "long",
+        "open: direction -> OPEN_TIMEFRAME",
+    )
+    state = await journal.ask_open_timeframe(upd.text("1h"), octx)
+    check(state == journal.OPEN_REASON, "open: timeframe -> OPEN_REASON (order)")
+    state = await journal.ask_open_reason(upd.text("broke range high"), octx)
+    check(
+        state == journal.OPEN_SCREENSHOT
+        and octx.user_data["reason"] == "broke range high",
+        "open: entry reason -> OPEN_SCREENSHOT",
+    )
+    state = await journal.ask_open_screenshot(upd.photo(), octx)
+    open_shot = octx.user_data.get("screenshot")
+    check(
+        state == journal.OPEN_TRADE_DATE and open_shot,
+        "open: entry screenshot -> OPEN_TRADE_DATE",
+    )
+    state = await journal.ask_open_trade_date(upd.text("2026-03-01"), octx)
+    check(
+        state == journal.OPEN_TRADE_HOUR
+        and octx.user_data["trade_date"] == "2026-03-01",
+        "open: entry date -> OPEN_TRADE_HOUR (separate questions)",
+    )
+    state = await journal.ask_open_trade_hour(upd.text("10:30"), octx)
+    check(
+        state == journal.OPEN_RISK and octx.user_data["entry_time"] == "10:30",
+        "open: entry time -> OPEN_RISK",
+    )
+    state = await journal.ask_open_risk(upd.text("1%"), octx)
+    check(
+        state == journal.OPEN_ENTRY and octx.user_data["risk_percent"] == 1,
+        "open: risk -> OPEN_ENTRY",
+    )
+    state = await journal.ask_open_entry(upd.text("2000"), octx)
+    check(state == journal.OPEN_TAKE_PROFIT, "open: entry -> OPEN_TAKE_PROFIT")
+    state = await journal.ask_open_take_profit(upd.text("2100"), octx)
+    check(state == journal.OPEN_STOP_LOSS, "open: TP -> OPEN_STOP_LOSS")
+    state = await journal.ask_open_stop_loss(upd.text("1950"), octx)
+    check(state == journal.OPEN_CONFIRM, "open: SL -> OPEN_CONFIRM")
+    summary = upd.sent[-1][1]
+    check(
+        "Market" in summary and "🪙 کریپتو" in summary
+        and "Symbol" in summary and "XAUUSD" in summary
+        and "TF" in summary and "1h" in summary
+        and "Reason" in summary and "broke range high" in summary
+        and "Shot" in summary and "📷" in summary
+        and "Date" in summary and "2026-03-01 10:30" in summary
+        and "Risk" in summary and "1%" in summary
+        and "Entry" in summary and "2000" in summary
+        and "TP / SL" in summary and "2100" in summary and "1950" in summary
+        and "معاملات باز" in summary,
+        "open: confirmation summary shows every answer (airy HTML)",
+    )
+    closed_before = db.count_trades()
+    state = await journal.save_open_trade(upd.text("✅ ثبت"), octx)
+    check(
+        state == journal.ConversationHandler.END and not octx.user_data,
+        "open: save -> END, draft cleared",
+    )
+    open_rows = db.get_open_trades(10)
+    check(
+        db.count_open_trades() == 1 and open_rows[0]["symbol"] == "XAUUSD",
+        "open: trade stored in open_trades",
+    )
+    xau = open_rows[0]
+    check(
+        xau["direction"] == "long" and xau["market"] == "crypto"
+        and xau["timeframe"] == "1h" and xau["reason"] == "broke range high"
+        and xau["screenshot"] == open_shot
+        and xau["trade_date"] == "2026-03-01" and xau["entry_time"] == "10:30"
+        and xau["risk_percent"] == 1 and xau["entry_price"] == 2000
+        and xau["take_profit"] == 2100 and xau["stop_loss"] == 1950,
+        "open: every questionnaire answer stored",
+    )
+    check(
+        db.count_trades() == closed_before,
+        "adding an open trade does not touch the closed list",
+    )
+
     # --- symbol suggestions: most used + recently traded ----------------------
     ctx5 = FakeContext()
     await journal.trade_start(upd.text("/trade"), ctx5)
@@ -906,6 +1041,281 @@ async def main() -> int:
         "🗑 tap on a stale id explains",
     )
 
+    # --- 🟢 panel: inline buttons, detail card, close flow ----------------------
+    op_upd = FakeUpdate()
+    await journal.open_trades(op_upd.text("/open"), FakeContext())
+    op_markup = _last_markup(op_upd)
+    check(
+        isinstance(op_markup, InlineKeyboardMarkup)
+        and op_upd.sent[-1][1].startswith("🟢"),
+        "🟢 /open sends the paginated open-trades panel",
+    )
+    op_flat = _inline_flat(op_markup)
+    check(
+        (f"🟢 #{xau['id']} — XAUUSD · 2000 📷", f"opn:v:{xau['id']}") in op_flat
+        and "opn:home" in [cb for _, cb in op_flat],
+        "open panel: one button per open trade with entry price + pager",
+    )
+    check(
+        ("➕ ثبت معامله باز", "opn:add") in op_flat,
+        "open panel carries the ➕ add button",
+    )
+
+    class FakeOpenQuery:
+        def __init__(self, data, upd):
+            self.data = data
+            self._upd = upd
+            self.answers = []
+
+        async def answer(self, text=None):
+            self.answers.append(text)
+
+        async def edit_message_text(self, text, reply_markup=None, **kwargs):
+            self._upd.sent.append(("edit", text, reply_markup))
+
+        async def edit_message_reply_markup(self, reply_markup=None, **kwargs):
+            self._upd.sent.append(("edit-markup", "", reply_markup))
+
+    class FakeOpenCallbackUpdate:
+        def __init__(self, data):
+            self.sent = []
+            self.effective_chat = FakeChat(self.sent)
+            self.message = None
+            self.callback_query = FakeOpenQuery(data, self)
+
+    async def _tap_open(data):
+        cb_upd = FakeOpenCallbackUpdate(data)
+        await journal.on_open_callback(cb_upd, FakeContext())
+        return cb_upd
+
+    odet = await _tap_open(f"opn:v:{xau['id']}")
+    kind_, text_, markup_ = odet.sent[-1]
+    check(
+        kind_ == "send" and f"معامله باز #{xau['id']} — <b>XAUUSD</b>" in text_,
+        "tapping an open trade SENDS its detail card",
+    )
+    check(
+        "Entry: <code>2000</code>" in text_
+        and "🎯 TP: <code>2100</code>" in text_
+        and "🛑 SL: <code>1950</code>" in text_
+        and "Risk: 1%" in text_
+        and "2026-03-01 10:30" in text_
+        and "broke range high" in text_,
+        "open detail card shows entry/TP/SL/risk/date/reason",
+    )
+    check(
+        ("🏁 Close trade", f"opn:c:{xau['id']}") in _inline_flat(markup_)
+        and ("🗑 حذف", f"opn:d:{xau['id']}") in _inline_flat(markup_)
+        and ("❌ بستن", "opn:close") in _inline_flat(markup_)
+        and ("📷 عکس چارت", f"opn:ph:{xau['id']}") in _inline_flat(markup_),
+        "open detail card has 🏁 Close, 🗑 delete, ❌ close and 📷 buttons",
+    )
+    oph = await _tap_open(f"opn:ph:{xau['id']}")
+    check(
+        any(s[0] == "photo" and "چارت ورود" in s[1] for s in oph.sent),
+        "📷 button on the open detail sends the entry screenshot",
+    )
+
+    # --- 🏁 close flow: TP-hit path with two exit photos -------------------------
+    cctx = FakeContext()
+    state = await journal._close_begin(
+        xau["id"], upd.text(f"/close {xau['id']}"), cctx
+    )
+    check(
+        state == journal.CLOSE_STATUS
+        and cctx.user_data["open_id"] == xau["id"]
+        and cctx.user_data["open_symbol"] == "XAUUSD",
+        "/close <id> starts CLOSE_STATUS",
+    )
+    state = await journal.ask_close_status(upd.text("✅ Win (TP)"), cctx)
+    check(
+        state == journal.CLOSE_DATE and cctx.user_data["hit"] == "win",
+        "close: Win (TP) -> CLOSE_DATE",
+    )
+    state = await journal.ask_close_date(upd.text("2026-03-03"), cctx)
+    check(state == journal.CLOSE_HOUR, "close: exit date -> CLOSE_HOUR (separate)")
+    state = await journal.ask_close_hour(upd.text("15:45"), cctx)
+    check(
+        state == journal.CLOSE_PHOTOS and cctx.user_data["exit_price"] == 2100,
+        "close: TP-hit auto-fills exit price 2100, -> CLOSE_PHOTOS",
+    )
+
+    state = await journal.ask_close_photos(upd.photo(), cctx)
+    check(
+        state == journal.CLOSE_PHOTOS
+        and len(cctx.user_data["exit_photos"].splitlines()) == 1,
+        "close: 1st exit photo stored (asks for more)",
+    )
+    state = await journal.ask_close_photos(upd.photo(), cctx)
+    check(
+        state == journal.CLOSE_PHOTOS
+        and len(cctx.user_data["exit_photos"].splitlines()) == 2,
+        "close: 2nd exit photo stored",
+    )
+    state = await journal.ask_close_photos_text(upd.text("⏭ بدون اسکرین‌شات"), cctx)
+    check(state == journal.CLOSE_REASON, "close: skip photos -> CLOSE_REASON")
+    state = await journal.ask_close_reason(
+        upd.text("TP tapped, momentum gone"), cctx
+    )
+    check(
+        state == journal.MOOD
+        and cctx.user_data["notes"] == "TP tapped, momentum gone",
+        "close: exit reason -> MOOD",
+    )
+    state = await journal.ask_close_mood(upd.text("آرام"), cctx)
+    check(
+        state == journal.CLOSE_CONFIRM and cctx.user_data["mood"] == "calm",
+        "close: mood -> CLOSE_CONFIRM",
+    )
+    csummary = upd.sent[-1][1]
+    check(
+        "Status" in csummary and "TP hit (Win)" in csummary
+        and "Exit" in csummary and "2100" in csummary
+        and "Date" in csummary and "2026-03-03 15:45" in csummary
+        and "Shots" in csummary and "۲" in csummary
+        and "Reason" in csummary and "Mood" in csummary and "آرام" in csummary,
+        "close: confirmation shows status/exit/date/shots/reason/mood",
+    )
+    state = await journal.save_close_trade(upd.text("✅ ثبت"), cctx)
+    check(
+        state == journal.ConversationHandler.END and not cctx.user_data,
+        "close: save -> END, draft cleared",
+    )
+    check(
+        db.count_open_trades() == 0 and db.get_open_trade(xau["id"]) is None,
+        "closed trade removed from open_trades",
+    )
+    closed = db.get_recent(1)[0]
+    check(
+        closed["symbol"] == "XAUUSD" and closed["source"] == "open"
+        and closed["hit"] == "win" and closed["exit_price"] == 2100
+        and closed["entry_price"] == 2000
+        and closed["trade_date"] == "2026-03-03"
+        and closed["exit_time"] == "15:45"
+        and closed["entry_time"] == "10:30"
+        and closed["entry_reason"] == "broke range high"
+        and closed["notes"] == "TP tapped, momentum gone"
+        and closed["exit_reason"] == "TP tapped, momentum gone"
+        and closed["mood"] == "calm"
+        and closed["screenshot"] == open_shot
+        and len((closed["exit_photos"] or "").splitlines()) == 2
+        and closed["pnl"] is None and closed["size"] is None
+        and closed["roi"] is None,
+        "closed row keeps both reasons/times/photos and NULL P&L",
+    )
+    st_after = db.get_stats()
+    check(
+        st_after["wins"] == 3 and st_after["losses"] == 2 and st_after["be"] == 0,
+        "open-flow closes count as win/loss/BE (NULL P&L classified by hit)",
+    )
+
+    # --- 🏁 close flow: manual exit via /close + skip tokens ----------------------
+    oid2 = db.add_open_trade(
+        symbol="BTCUSD", direction="short", market="crypto", timeframe="4h",
+        reason="", screenshot=None, trade_date="2026-03-02", entry_time="08:00",
+        risk_percent=2, entry_price=60000, take_profit=57000, stop_loss=61500,
+    )
+    cctx2 = FakeContext()
+    state = await journal.close_start_text(upd.text("/close"), cctx2)
+    check(
+        state == journal.ConversationHandler.END,
+        "/close without an id explains usage",
+    )
+    cctx2 = FakeContext(args=[str(oid2)])
+    state = await journal.close_start_text(upd.text("/close"), cctx2)
+    state = await journal.close_start_text(
+        upd.text(f"/close {oid2}"), cctx2
+    )
+    check(
+        state == journal.CLOSE_STATUS and cctx2.user_data["open_id"] == oid2,
+        "/close <id> enters the close flow",
+    )
+    state = await journal.ask_close_status(upd.text("✏️ Manual"), cctx2)
+    check(
+        state == journal.CLOSE_DATE and cctx2.user_data["hit"] == "manual",
+        "close: Manual -> CLOSE_DATE",
+    )
+    await journal.ask_close_date(upd.text("2026-03-04"), cctx2)
+    state = await journal.ask_close_hour(upd.text("-"), cctx2)
+    check(state == journal.CLOSE_PRICE, "close: manual exit asks for the price")
+    state = await journal.ask_close_price(upd.text("58500"), cctx2)
+    check(
+        state == journal.CLOSE_PHOTOS
+        and cctx2.user_data["exit_price"] == 58500,
+        "close: manual price stored",
+    )
+    state = await journal.ask_close_photos_text(upd.text("-"), cctx2)
+    check(state == journal.CLOSE_REASON, "close: no exit photos -> reason")
+    await journal.ask_close_reason(upd.text("-"), cctx2)
+    state = await journal.ask_close_mood(upd.text("⏭ رد کردن"), cctx2)
+    check(state == journal.CLOSE_CONFIRM, "close: mood skip -> confirm")
+    state = await journal.save_close_trade(upd.text("y"), cctx2)
+    check(state == journal.ConversationHandler.END, "close: manual trade saved")
+    manual = db.get_recent(1)[0]
+    check(
+        manual["hit"] == "manual" and manual["exit_price"] == 58500
+        and manual["exit_time"] == "" and manual["trade_date"] == "2026-03-04",
+        "manual exit stored with typed price and skipped time",
+    )
+
+    # --- 🏁 close flow: BE auto-fills the entry price ------------------------------
+    oid3 = db.add_open_trade(
+        symbol="ETHUSD", direction="long", market="crypto", timeframe="1h",
+        reason="", screenshot=None, trade_date="2026-03-02", entry_time="",
+        risk_percent=None, entry_price=3000, take_profit=3200, stop_loss=2900,
+    )
+    cctx3 = FakeContext()
+    await journal._close_begin(oid3, upd.text("x"), cctx3)
+    await journal.ask_close_status(upd.text("➖ BE"), cctx3)
+    await journal.ask_close_date(upd.text("2026-03-05"), cctx3)
+    state = await journal.ask_close_hour(upd.text("12:00"), cctx3)
+    check(
+        state == journal.CLOSE_PHOTOS
+        and cctx3.user_data["exit_price"] == 3000,
+        "close: BE auto-fills the entry price as exit",
+    )
+    await journal.ask_close_photos_text(upd.text("-"), cctx3)
+    await journal.ask_close_reason(upd.text("-"), cctx3)
+    state = await journal.ask_close_mood(upd.text("-"), cctx3)
+    check(state == journal.CLOSE_CONFIRM, "close: BE mood skipped -> confirm")
+    state = await journal.save_close_trade(upd.text("✅ ثبت"), cctx3)
+    check(state == journal.ConversationHandler.END, "close: BE trade saved")
+    be_row = db.get_recent(1)[0]
+    check(
+        be_row["hit"] == "be" and be_row["exit_price"] == 3000
+        and be_row["risk_percent"] is None,
+        "BE close stored with the entry price as exit",
+    )
+
+    # --- 🟢 empty panel auto-starts the questionnaire; ➕ button dispatches ------
+    class FakeApplication:
+        def __init__(self):
+            self.updates = []
+
+        async def process_update(self, update):
+            self.updates.append(update)
+
+    app_empty = FakeApplication()
+    ectx = FakeContext()
+    ectx.application = app_empty
+    await journal.open_trades(upd.text("/open"), ectx)
+    check(
+        len(app_empty.updates) == 1
+        and app_empty.updates[0].message.text == "➕ ثبت معامله باز",
+        "empty 🟢 panel auto-starts the questionnaire (synthetic ➕ text)",
+    )
+
+    app_add = FakeApplication()
+    add_ctx = FakeContext()
+    add_ctx.application = app_add
+    add_upd = FakeOpenCallbackUpdate("opn:add")
+    await journal.on_open_callback(add_upd, add_ctx)
+    check(
+        len(app_add.updates) == 1
+        and app_add.updates[0].message.text == "➕ ثبت معامله باز",
+        "➕ panel button dispatches the questionnaire entry",
+    )
+
     # --- mood parsing details ---------------------------------------------------
     ctx7 = FakeContext()
     await journal._prompt_mood(upd)
@@ -917,20 +1327,21 @@ async def main() -> int:
         "typed mood alias accepted",
     )
 
-    # --- stats: db aggregates + inline panel -------------------------------------
+    # --- mood parsing details ---------------------------------------------------
     check(
-        [s for s, _ in db.get_all_symbols()] == ["MSFT", "EURUSD", "BTCUSD"],
-        "symbols sorted by last trade (picker order)",
+        [s for s, _ in db.get_all_symbols()][:3]
+        == ["ETHUSD", "BTCUSD", "XAUUSD"],
+        "symbols sorted by last trade (picker order, open-flow closes included)",
     )
     breakdown = db.get_mood_breakdown()
     check(
         [(r["mood"], r["trades"], r["total"]) for r in breakdown]
-        == [("anxious", 1, 2.0), ("calm", 1, -1.0)],
+        == [("anxious", 1, 2.0), ("calm", 2, -1.0)],
         "mood breakdown ordered by P&L",
     )
     stats_all = db.get_stats()
     check(
-        stats_all["trades"] == 4 and stats_all["be"] == 0,
+        stats_all["trades"] == 7 and stats_all["be"] == 1,
         "stats totals + BE count",
     )
     check(db.get_stats(symbol="EURUSD")["trades"] == 2, "stats filter by symbol")
@@ -1016,7 +1427,7 @@ async def main() -> int:
     pk = last[2]
     pk_labels = [b.text for row in pk.inline_keyboard for b in row]
     check(
-        pk_labels[0] == "MSFT (1)"
+        pk_labels[0] == "ETHUSD (1)"
         and any(lbl.startswith("BTCUSD") for lbl in pk_labels),
         "picker lists symbols sorted by last trade with counts",
     )
@@ -1103,7 +1514,7 @@ async def main() -> int:
         == ["ID", "Symbol", "Market", "Direction", "Timeframe"],
         "export header row present",
     )
-    check(ws.max_row == 5, "export has one row per trade (4 trades)")
+    check(ws.max_row == 8, "export has one row per trade (7 trades)")
     check(
         "Screenshot" not in [c.value for c in ws[1]] and ws.max_column == 19,
         "export has no screenshot columns (photos stay in Telegram)",
@@ -1387,7 +1798,7 @@ async def main() -> int:
     check(
         all(
             cmd in menu_text
-            for cmd in ("/trade", "/recent", "/stats", "/delete", "/cancel")
+            for cmd in ("/trade", "/open", "/recent", "/stats", "/delete", "/cancel")
         ),
         "menu lists every command with an explanation",
     )
@@ -1415,6 +1826,8 @@ async def main() -> int:
     expected_menu = {
         "📊 آمار": journal.stats,
         "📊 Stats": journal.stats,  # English aliases still route
+        "🟢 معاملات باز": journal.open_trades,
+        "🟢 Open trades": journal.open_trades,
         "🕘 معاملات اخیر": journal.recent,
         "🕘 Recent": journal.recent,
         "📥 اکسل": journal.export_trades,
@@ -1485,6 +1898,80 @@ async def main() -> int:
         check(
             not journal._RECENT_CB_RE.match(data),
             f"non-recent callback data '{data}' is ignored",
+        )
+
+    # --- 🟢 open/close conversation wiring (real PTB routing) -------------------
+    open_conv = journal.build_open_conversation()
+
+    def _open_entry(update):
+        result = open_conv.check_update(update)
+        open_conv._conversations.clear()
+        return result[2] if result else None
+
+    handler = _open_entry(_text_update("➕ ثبت معامله باز"))
+    check(
+        getattr(handler, "callback", None) is journal.open_trade_start,
+        "➕ text enters the open conversation",
+    )
+    check(
+        _open_entry(_text_update("🟢 معاملات باز")) is None,
+        "🟢 menu label does not enter the conversation (opens the panel)",
+    )
+
+    okey = open_conv._get_key(_text_update("long"))
+
+    def _routed_open(st, update):
+        open_conv._conversations[okey] = st
+        result = open_conv.check_update(update)
+        open_conv._conversations.clear()
+        return result[2] if result else None
+
+    open_cases = [
+        (journal.OPEN_MARKET, "🪙 کریپتو", journal.ask_open_market),
+        (journal.OPEN_SYMBOL, "XAUUSD", journal.ask_open_symbol),
+        (journal.OPEN_DIRECTION, "📈 Long", journal.ask_open_direction),
+        (journal.OPEN_TIMEFRAME, "1h", journal.ask_open_timeframe),
+        (journal.OPEN_REASON, "broke out", journal.ask_open_reason),
+        (journal.OPEN_SCREENSHOT, "-", journal.ask_open_screenshot_text),
+        (journal.OPEN_TRADE_DATE, "2026-03-01", journal.ask_open_trade_date),
+        (journal.OPEN_TRADE_HOUR, "10:30", journal.ask_open_trade_hour),
+        (journal.OPEN_RISK, "1%", journal.ask_open_risk),
+        (journal.OPEN_ENTRY, "2000", journal.ask_open_entry),
+        (journal.OPEN_TAKE_PROFIT, "2100", journal.ask_open_take_profit),
+        (journal.OPEN_STOP_LOSS, "1950", journal.ask_open_stop_loss),
+        (journal.OPEN_CONFIRM, "✅ ثبت", journal.save_open_trade),
+    ]
+    for st, text, fn in open_cases:
+        handler = _routed_open(st, _text_update(text))
+        check(
+            getattr(handler, "callback", None) is fn,
+            f"open conv routes '{text}' to {fn.__name__}",
+        )
+
+    close_conv = journal.build_close_conversation()
+    ckey = close_conv._get_key(_text_update("long"))
+
+    def _routed_close(st, update):
+        close_conv._conversations[ckey] = st
+        result = close_conv.check_update(update)
+        close_conv._conversations.clear()
+        return result[2] if result else None
+
+    close_cases = [
+        (journal.CLOSE_STATUS, "✅ Win (TP)", journal.ask_close_status),
+        (journal.CLOSE_DATE, "2026-03-02", journal.ask_close_date),
+        (journal.CLOSE_HOUR, "15:45", journal.ask_close_hour),
+        (journal.CLOSE_PRICE, "58500", journal.ask_close_price),
+        (journal.CLOSE_PHOTOS, "-", journal.ask_close_photos_text),
+        (journal.CLOSE_REASON, "target", journal.ask_close_reason),
+        (journal.CLOSE_MOOD, "آرام", journal.ask_close_mood),
+        (journal.CLOSE_CONFIRM, "✅ ثبت", journal.save_close_trade),
+    ]
+    for st, text, fn in close_cases:
+        handler = _routed_close(st, _text_update(text))
+        check(
+            getattr(handler, "callback", None) is fn,
+            f"close conv routes '{text}' to {fn.__name__}",
         )
 
     check(
