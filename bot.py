@@ -4,8 +4,7 @@ import logging
 import os
 from pathlib import Path
 
-from telegram import BotCommand, MenuButtonCommands, Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, ContextTypes
 
 import db
 import journal
@@ -54,28 +53,16 @@ def get_token() -> str:
     return token
 
 
-# The '/' commands shown when the ☰ menu button next to the message bar is
-# tapped (registered with setMyCommands on startup).
-BOT_COMMANDS = [
-    BotCommand("start", "🏠 منوی اصلی"),
-    BotCommand("help", "❓ راهنمای استفاده از ربات"),
-    BotCommand("trade", "📈 ثبت معامله بسته‌شده"),
-    BotCommand("open", "🟢 ثبت معاملهٔ باز جدید"),
-    BotCommand("opens", "🟢 معاملات باز — دیدن و بستن معامله‌های جاری"),
-    BotCommand("recent", "🕘 معاملات اخیر — هر معامله یک دکمه، جزئیات کامل و حذف"),
-    BotCommand("stats", "📊 آمار — فیلتر بازه و نماد (دکمه‌های داخل پیام)"),
-    BotCommand("settings", "⚙️ تنظیمات — بودجهٔ حساب (USD)"),
-    BotCommand("export", "📥 دانلود همه معاملات به‌صورت اکسل"),
-    BotCommand("delete", "🗑 حذف یک معامله با شماره"),
-    BotCommand("cancel", "✖️ لغو ثبت جاری"),
-]
-
-
 async def post_init(app: Application) -> None:
-    """Register the menu-button command list before polling starts."""
-    await app.bot.set_my_commands(BOT_COMMANDS)
-    await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-    logger.info("Menu commands registered (%s commands).", len(BOT_COMMANDS))
+    """Remove the legacy ☰ command list / menu button.
+
+    The inline UI needs no slash-command menu — everything is a button on the
+    bot's messages. The old registration would otherwise keep living in
+    Telegram clients, so it is cleared on every start.
+    """
+    await app.bot.set_my_commands([])
+    await app.bot.set_chat_menu_button()
+    logger.info("Legacy command menu cleared (everything is inline now).")
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -92,7 +79,6 @@ def main() -> None:
         .build()
     )
     app.add_handler(CommandHandler("start", journal.show_menu))
-    app.add_handler(CommandHandler("help", journal.show_menu))
     app.add_handler(CommandHandler("settings", journal.show_settings))
     app.add_handler(journal.build_conversation())
     app.add_handler(journal.build_open_conversation())

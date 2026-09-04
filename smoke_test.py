@@ -2223,7 +2223,6 @@ async def main() -> int:
         (journal.OPEN_TRADE_HOUR, "الان", journal.ask_open_trade_hour),
         (journal.OPEN_RISK, "1%", journal.ask_open_risk),
         (journal.OPEN_MARGIN, "250", journal.ask_open_margin),
-        (journal.OPEN_MARGIN, "🧮 محاسبه خودکار", journal.ask_open_margin),
         (journal.OPEN_ENTRY, "2000", journal.ask_open_entry),
         (journal.OPEN_TAKE_PROFIT, "2100", journal.ask_open_take_profit),
         (journal.OPEN_STOP_LOSS, "1950", journal.ask_open_stop_loss),
@@ -2235,6 +2234,12 @@ async def main() -> int:
             _inner_fn(handler) is fn,
             f"open conv routes '{text}' to {fn.__name__}",
         )
+    # 🧮 محاسبه خودکار is inline-only (a menu label, never typed text).
+    handler = _routed_open(journal.OPEN_MARGIN, _cb_update("q:🧮 محاسبه خودکار"))
+    check(
+        _inner_fn(handler) is journal.ask_open_margin,
+        "open conv routes the 🧮 inline tap to ask_open_margin",
+    )
 
     close_conv = journal.build_close_conversation()
 

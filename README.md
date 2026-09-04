@@ -68,16 +68,19 @@ skip shortcut). The old reply-keyboard bar under the input field is gone.
 
 ## Menu
 
-- The **☰ button next to the message bar** opens the bot's command list —
-  every command with a short emoji explanation. It is registered
-  automatically when the bot starts (`set_my_commands`).
-- `/start` and `/help` send the **main menu as a message with inline
-  buttons**: 📈 ثبت معامله بسته · 🟢 ثبت معامله باز / 🟢 معاملات باز · 📊 آمار /
-  🕘 معاملات اخیر · 📥 اکسل / ⚙️ تنظیمات. The closed-trade button is labeled
-  «ثبت معامله بسته» — it logs a trade that was already exited (/trade) — so it
-  can never be confused with the open-trade one. The menu message **stays in
-  place** while secondary screens open on top of it, and 📈 / 🟢 safely restart
-  their questionnaires even mid-entry.
+- The inline UI needs **no ☰ command list** — the bot clears its legacy
+  slash-command registration on every start, so the ☰ button next to the
+  message bar stays empty. Everything is a button on the bot's messages.
+- `/start` sends the **main menu as a message with inline buttons**: 📈 ثبت
+  معامله بسته · 🟢 ثبت معامله باز / 🟢 معاملات باز · 📊 آمار / 🕘 معاملات اخیر ·
+  📥 اکسل / ⚙️ تنظیمات. The closed-trade button is labeled «ثبت معامله بسته» —
+  it logs a trade that was already exited (/trade) — so it can never be
+  confused with the open-trade one. The menu message **stays in place** while
+  secondary screens open on top of it, and 📈 / 🟢 safely restart their
+  questionnaires even mid-entry.
+- The **first menu after (re)starting the bot** also removes the persistent
+  reply-keyboard bar of the old UI (one short confirmation message asks
+  Telegram to drop it — afterwards the bar never comes back).
 - Every secondary screen (⚙️ تنظیمات → 💰 بودجه, and the 🏠 Home button of the
   📊/🕘/🟢 panels) **drills down**: the current screen is deleted and the next
   one appears, with a **🔙 بازگشت** row that deletes the screen and shows the

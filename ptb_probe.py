@@ -35,6 +35,10 @@ class StubBot(Bot):
         return self._sent
 
     @property
+    def username(self):
+        return "ProbeBot"  # CommandHandler.check_update parses "@name" mentions
+
+    @property
     def deleted(self):
         return self._deleted
 
@@ -256,6 +260,52 @@ async def main():
     assert st is None and cx.user_data.get("_flow_q") is None, (st, cx.user_data)
     assert 34 in stub.deleted
     print("PASS  ✖️ لغو tap ends the /trade flow and deletes the question")
+
+    # 8) /start end-to-end through real PTB dispatch. Regression: the menu
+    # text used to contain "<id>", which Telegram's HTML parser rejects —
+    # /start failed silently with "can't parse entities".
+    from telegram import MessageEntity
+    from telegram.ext import CommandHandler
+
+    handler = CommandHandler("start", journal.show_menu)
+
+    def start_up(oid):
+        msg = Message(
+            message_id=oid,
+            date=datetime.now(),
+            chat=chat,
+            from_user=user,
+            text="/start",
+            entities=[
+                MessageEntity(
+                    type=MessageEntity.BOT_COMMAND, offset=0, length=6
+                )
+            ],
+        )
+        msg.set_bot(stub)
+        upd = Update(update_id=oid, message=msg)
+        upd.set_bot(stub)
+        return upd
+
+    async def run_start_full(upd):
+        res = handler.check_update(upd)
+        assert res, "/start not matched by CommandHandler"
+        cx = app.context_types.context.from_update(upd, app)
+        await cx.refresh_data()
+        await handler.handle_update(upd, app, res, cx)
+
+    await run_start_full(start_up(40))
+    assert any("👋" in t for t in stub.sent), "menu text not sent"
+    # the one-time reply-bar-removal confirmation went out
+    assert any("رابط جدید" in t for t in stub.sent), stub.sent
+    print("PASS  /start -> inline menu sent (HTML-safe) + stale bar removed")
+
+    n = len(stub.sent)
+    await run_start_full(start_up(41))
+    added = stub.sent[n:]
+    assert not any("رابط جدید" in t for t in added), added
+    assert any("👋" in t for t in added), added
+    print("PASS  second /start re-sends the menu without the cleanup message")
 
     print("ALL PROBES PASSED")
 

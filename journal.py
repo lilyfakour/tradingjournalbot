@@ -36,7 +36,6 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
-    ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     Update,
 )
@@ -115,27 +114,9 @@ _CANCEL_RE = re.compile(
     r"^\s*(?:/cancel|cancel|لغو|انصراف|✖️\s*(?:cancel|لغو|انصراف))\s*$",
     re.IGNORECASE,
 )
-# Main-menu button labels. The emoji stays required so plain words can still
-# be typed as answers (notes, symbols, ...); case-insensitive, and both the
-# Persian and the original English words route.
-_NEW_TRADE_RE = re.compile(
-    r"^\s*📈\s*"
-    r"(?:بستن\s*معامله|ثبت\s*معامله\s*بسته|close\s*trade|new\s*trade|معامله\s*جدید)"
-    r"\s*$",
-    re.IGNORECASE,
-)
-# ⚙️ تنظیمات — the settings panel (budget lives there).
-_SETTINGS_RE = re.compile(r"^\s*⚙️\s*(?:settings|تنظیمات)\s*$", re.IGNORECASE)
-_STATS_RE = re.compile(r"^\s*📊\s*(?:stats|آمار)\s*$", re.IGNORECASE)
-_RECENT_RE = re.compile(r"^\s*🕘\s*(?:recent|معاملات\s*اخیر|اخیر)\s*$", re.IGNORECASE)
-_OPEN_RE = re.compile(r"^\s*🟢\s*(?:open\s*trades|معاملات\s*باز|باز)\s*$", re.IGNORECASE)
-# 🟢 ثبت معامله باز — starts the open-trade questionnaire straight away.
-_OPEN_ADD_TEXT_RE = re.compile(
-    r"^\s*🟢\s*(?:ثبت\s*معامله\s*باز|add\s*open\s*trade)\s*$", re.IGNORECASE
-)
-_EXPORT_RE = re.compile(r"^\s*📥\s*(?:export|اکسل)\s*$", re.IGNORECASE)
-_MENU_HOME_RE = re.compile(r"^\s*🏠\s*(?:menu|منو)\s*$", re.IGNORECASE)
-_MENU_HELP_RE = re.compile(r"^\s*❓\s*(?:help|راهنما)\s*$", re.IGNORECASE)
+# Menu labels (inline buttons and their old reply-bar spellings). A bare text
+# like this is never a flow answer (notes/symbols are free text, so a typed
+# "stats" cannot be a note) — it is excluded from the answer filter.
 _MENU_RE = re.compile(
     r"^\s*(?:📈\s*"
     r"(?:بستن\s*معامله|ثبت\s*معامله\s*بسته|close\s*trade|new\s*trade|معامله\s*جدید)"
@@ -144,7 +125,9 @@ _MENU_RE = re.compile(
     r"|⚙️\s*(?:settings|تنظیمات)"
     r"|🕘\s*(?:recent|معاملات\s*اخیر|اخیر)"
     r"|📥\s*(?:export|اکسل)"
-    r"|🏠\s*(?:menu|منو)|❓\s*(?:help|راهنما))\s*$",
+    r"|🧮\s*محاسبه\s*خودکار"
+    r"|🏠\s*(?:menu|منو|home|خانه)"
+    r"|❓\s*(?:help|راهنما))\s*$",
     re.IGNORECASE,
 )
 _ANSWER = _TEXT & ~filters.Regex(_CANCEL_RE) & ~filters.Regex(_MENU_RE)
@@ -376,7 +359,7 @@ _build_keyboards()
 
 
 # --------------------------------------------------------------------------
-# Main menu — a welcome MESSAGE with inline buttons (sent by /start /help).
+# Main menu — a welcome MESSAGE with inline buttons (sent by /start).
 # --------------------------------------------------------------------------
 MENU_TEXT = (
     "📈 /trade — ثبت معاملهٔ بسته‌شده (بعد از خروج از معامله)\n"
@@ -386,7 +369,7 @@ MENU_TEXT = (
     "📊 /stats — آمار عملکرد؛ فیلتر بازه زمانی و نماد با دکمه‌های داخل پیام\n"
     "⚙️ /settings — تنظیمات؛ بودجهٔ حساب (USD) برای محاسبهٔ مارجین و ریسک\n"
     "📥 /export — دریافت همه معاملات به‌صورت فایل اکسل\n"
-    "🗑 /delete <id> — حذف یک معامله\n"
+    "🗑 /delete شماره — حذف یک معامله\n"
     "✖️ /cancel — لغو ثبت جاری\n\n"
     "برای شروع یکی از دکمه‌های زیر را بزنید؛ در هر مرحله می‌توانید به‌جای "
     "دکمه، پاسخ را تایپ کنید."
@@ -531,17 +514,11 @@ SCREENSHOT_DIR = Path(
 
 
 # --------------------------------------------------------------------------
-# Reply keyboards — the buttons shown under the message input field
+# Stale reply-bar removal — the old UI's persistent keyboard keeps living on
+# the user's client until a message asks Telegram to remove it.
 # --------------------------------------------------------------------------
 
-def _rk(rows: list[list[str]], one_time: bool = True) -> ReplyKeyboardMarkup:
-    """Build a reply keyboard (one-time keyboards hide after a tap)."""
-    return ReplyKeyboardMarkup(
-        rows,
-        resize_keyboard=True,
-        one_time_keyboard=one_time,
-        is_persistent=not one_time,
-    )
+_MENU_KILLER = ReplyKeyboardRemove()
 
 
 _CANCEL_ROW = ["✖️ لغو"]
@@ -625,7 +602,22 @@ async def show_menu(
     """
     user = getattr(update, "effective_user", None)
     name = (getattr(user, "first_name", "") or "").strip()
-    hello = f"سلام {name}! 👋\n\n" if name else "سلام! 👋\n\n"
+    hello = (
+        f"سلام {html.escape(name)}! 👋\n\n" if name else "سلام! 👋\n\n"
+    )
+    # The old UI's persistent reply-keyboard bar keeps living on the user's
+    # client until a message asks Telegram to remove it — the first menu of
+    # a session does that once, then the flag stops the extra message.
+    if not context.user_data.get("_reply_bar_cleared"):
+        context.user_data["_reply_bar_cleared"] = True
+        try:
+            await update.effective_chat.send_message(
+                "✅ رابط جدید فعال شد — دکمه‌های قدیمی زیر صفحهٔ ورودی حذف "
+                "شدند؛ از این به بعد همه‌چیز داخل همین پیام‌هاست.",
+                reply_markup=_MENU_KILLER,
+            )
+        except Exception:
+            logger.info("Stale reply bar could not be removed.")
     await _show_screen(
         context,
         update.effective_chat.id,
