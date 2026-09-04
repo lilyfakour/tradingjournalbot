@@ -109,10 +109,12 @@ class FakeUpdate:
 
 
 class FakeContext:
-    def __init__(self, args=None):
+    def __init__(self, args=None, log=None):
         self.user_data = {}
         self.args = args or []
-        self.bot = None  # stats callbacks send/refresh via context.bot
+        # Screen sends (settings/budget) go through context.bot; when a log
+        # is passed, the bot writes into the SAME list the FakeUpdate reads.
+        self.bot = FakeBot(log if log is not None else [])
 
 
 class FakeBot:
@@ -143,9 +145,23 @@ class FakeBot:
     async def send_chat_action(self, chat_id, action, **kwargs):
         self._log.append(("action", action, None))
 
+    async def delete_message(self, chat_id=None, message_id=None, **kwargs):
+        self._log.append(("bot-delete", message_id, None))
+        return True
+
 
 def _labels(markup):
-    return [btn.text for row in markup.keyboard for btn in row]
+    """Button labels of a reply- or inline-keyboard markup (or None)."""
+    if markup is None:
+        return []
+    rows = getattr(markup, "inline_keyboard", None)
+    if rows is None:
+        rows = getattr(markup, "keyboard", None) or []
+    labels = []
+    for row in rows:
+        for btn in row:
+            labels.append(btn if isinstance(btn, str) else btn.text)
+    return labels
 
 
 def _inline_flat(markup):
@@ -156,15 +172,11 @@ def _inline_flat(markup):
 
 
 def _home_labels():
+    """Labels of the inline main menu (journal._MENU_IK)."""
     return [
-        "📈 ثبت معامله بسته",
-        "🟢 ثبت معامله باز",
-        "🟢 معاملات باز",
-        "📊 آمار",
-        "🕘 معاملات اخیر",
-        "📥 اکسل",
-        "⚙️ تنظیمات",
-        "🏠 منو",
+        btn.text
+        for row in journal._MENU_IK.inline_keyboard
+        for btn in row
     ]
 
 
@@ -180,9 +192,7 @@ def _markup_with(upd, marker):
     """Last reply markup containing a button with *marker* in its label."""
     for entry in reversed(upd.sent):
         markup = entry[2]
-        if markup is not None and any(
-            marker in btn.text for row in markup.keyboard for btn in row
-        ):
+        if markup is not None and marker in _labels(markup):
             return markup
     return None
 
@@ -334,8 +344,8 @@ async def main() -> int:
         "market choice -> SYMBOL",
     )
     check(
-        isinstance(_last_markup(upd), ReplyKeyboardRemove),
-        "typing prompt hides the keyboard (menu only at the end)",
+        not isinstance(_last_markup(upd), (ReplyKeyboardMarkup, ReplyKeyboardRemove)),
+        "typing prompt no longer uses the reply bar (inline only)",
     )
 
     state = await journal.ask_symbol(upd.text("eurusd"), ctx)
@@ -345,8 +355,8 @@ async def main() -> int:
     )
     markup = _last_markup(upd)
     check(
-        isinstance(markup, ReplyKeyboardMarkup),
-        "direction prompt uses a reply keyboard (under the screen)",
+        isinstance(markup, InlineKeyboardMarkup),
+        "direction prompt is an inline keyboard",
     )
     labels = _labels(markup)
     check(
@@ -363,7 +373,8 @@ async def main() -> int:
     check(
         all(
             lbl in lev_labels
-            for lbl in ("×2", "×10", "×100", "⏭ بدون اهرم", "✖️ لغو")
+            for lbl in ("×2", "×3", "×5", "×10", "×20", "×50", "×100", "×125",
+                        "⏭ بدون اهرم", "✖️ لغو")
         ),
         "leverage buttons present",
     )
@@ -388,8 +399,8 @@ async def main() -> int:
         "typed '1h' -> ENTRY",
     )
     check(
-        isinstance(_last_markup(upd), ReplyKeyboardRemove),
-        "typing prompts hide the keyboard (menu only at the end)",
+        not isinstance(_last_markup(upd), (ReplyKeyboardMarkup, ReplyKeyboardRemove)),
+        "typing prompts no longer use the reply bar (inline only)",
     )
 
     await journal.ask_entry(upd.text("100"), ctx)
@@ -511,10 +522,13 @@ async def main() -> int:
         state == journal.ConversationHandler.END,
         "Save button -> END",
     )
-    check(not ctx.user_data, "draft cleared after save")
     check(
-        _labels(_last_markup(upd)) == _home_labels(),
-        "after save the persistent main-menu bar is shown again",
+        all(k == "_screens" for k in ctx.user_data),
+        "draft cleared after save (screen bookkeeping kept)",
+    )
+    check(
+        upd.sent[-1][2] is None,
+        "after save no reply bar is sent (the menu message stays in place)",
     )
     conf = upd.sent[-1][1]
     check(
@@ -795,7 +809,8 @@ async def main() -> int:
     closed_before = db.count_trades()
     state = await journal.save_open_trade(upd.text("✅ ثبت"), octx)
     check(
-        state == journal.ConversationHandler.END and not octx.user_data,
+        state == journal.ConversationHandler.END
+        and all(k == "_screens" for k in octx.user_data),
         "open: save -> END, draft cleared",
     )
     open_rows = db.get_open_trades(10)
@@ -825,8 +840,8 @@ async def main() -> int:
     )
 
     # --- settings / budget feature ---------------------------------------------
-    bctx = FakeContext()
-    await journal.settings_budget(upd.text("💰 بودجه"), bctx)
+    bctx = FakeContext(log=upd.sent)
+    await journal._send_budget_screen(upd, bctx)
     check(
         "بودجهٔ فعلی" in upd.sent[-1][1] and "—" in upd.sent[-1][1],
         "settings: 💰 prompt shows the (unset) current budget",
@@ -836,7 +851,7 @@ async def main() -> int:
         db.get_budget() == 500.0 and "500" in upd.sent[-1][1],
         "settings: typed number after the prompt becomes the budget",
     )
-    await journal.settings_budget(upd.text("💰 بودجه"), bctx)
+    await journal._send_budget_screen(upd, bctx)
     check(
         "500" in upd.sent[-1][1] and "—" not in upd.sent[-1][1].split("بودجهٔ فعلی")[1][:40],
         "settings: prompt shows the stored budget",
@@ -859,7 +874,7 @@ async def main() -> int:
         db.get_budget() == _before,
         "settings: the budget prompt expires (stray numbers stay ignored)",
     )
-    await journal.settings_budget(upd.text("💰 بودجه"), bctx)
+    await journal._send_budget_screen(upd, bctx)
     await journal.settings_budget_value(upd.text("حذف"), bctx)
     check(db.get_budget() is None, "settings: 'حذف' clears the budget")
     await journal.settings_budget_value(upd.text("budget 750"), FakeContext())
@@ -990,8 +1005,8 @@ async def main() -> int:
     await journal.ask_market(upd.text("🪙 کریپتو"), ctx_kb)
     kb = upd.sent[-1][2]
     check(
-        isinstance(kb, ReplyKeyboardMarkup),
-        "symbol prompt shows a reply keyboard",
+        isinstance(kb, InlineKeyboardMarkup),
+        "symbol prompt shows an inline keyboard",
     )
     kb_labels = _labels(kb)
     check(
@@ -1012,7 +1027,7 @@ async def main() -> int:
     state = await journal.ask_symbol(upd.text("not a symbol"), ctx_kb)
     check(
         state == journal.SYMBOL
-        and isinstance(upd.sent[-1][2], ReplyKeyboardMarkup),
+        and isinstance(upd.sent[-1][2], InlineKeyboardMarkup),
         "invalid symbol re-prompts with the symbol buttons",
     )
 
@@ -1045,7 +1060,8 @@ async def main() -> int:
     )
     state = await journal.save_trade(upd.text("❌ ثبت نشود"), ctx3)
     check(
-        state == journal.ConversationHandler.END and not ctx3.user_data,
+        state == journal.ConversationHandler.END
+        and all(k == "_screens" for k in ctx3.user_data),
         "Discard button -> END, draft cleared",
     )
     check(
@@ -1054,8 +1070,8 @@ async def main() -> int:
         "discarded draft's screenshot files removed",
     )
     check(
-        _labels(_last_markup(upd)) == _home_labels(),
-        "discard restores the main-menu bar",
+        upd.sent[-1][2] is None,
+        "discard sends no reply bar (the menu message stays in place)",
     )
 
     # --- ✖️ Cancel mid-flow also removes the screenshot ------------------------
@@ -1313,7 +1329,8 @@ async def main() -> int:
     )
     state = await journal.save_close_trade(upd.text("✅ ثبت"), cctx)
     check(
-        state == journal.ConversationHandler.END and not cctx.user_data,
+        state == journal.ConversationHandler.END
+        and all(k == "_screens" for k in cctx.user_data),
         "close: save -> END, draft cleared",
     )
     check(
@@ -1495,7 +1512,7 @@ async def main() -> int:
 
     # --- mood parsing details ---------------------------------------------------
     ctx7 = FakeContext()
-    await journal._prompt_mood(upd)
+    await journal._prompt_mood(upd, ctx7)
     state = await journal.ask_mood(upd.text("banana"), ctx7)
     check(state == journal.MOOD, "invalid mood reprompts")
     state = await journal.ask_mood(upd.text("fomo"), ctx7)
@@ -1752,8 +1769,8 @@ async def main() -> int:
     )
     check("همه معاملات" in caption, "export caption present")
     check(
-        markup is journal._MENU_KEYBOARD,
-        "export document re-attaches the main-menu bar",
+        markup is None,
+        "export document carries no reply bar (the menu message stays)",
     )
     check(
         list(export.EXPORT_DIR.glob("trades-*.xlsx")) == [],
@@ -1891,8 +1908,8 @@ async def main() -> int:
     _budget_value_h = next(
         h for h in _sh if h.callback is journal.settings_budget_value
     )
-    _budget_menu_h = next(
-        h for h in _sh if h.callback is journal.settings_budget
+    _settings_cb_h = next(
+        h for h in _sh if h.callback is journal.on_settings_callback
     )
     for _txt in ("500", "۵۰۰", "1250.50", "budget: 500", "budget 500 usd", "حذف"):
         check(
@@ -1904,9 +1921,24 @@ async def main() -> int:
             not _budget_value_h.check_update(_text_update(_txt)),
             f"non-budget text '{_txt}' is not swallowed by the value handler",
         )
+
+    def _cb_update(data):
+        cq_msg = Message(
+            message_id=5, date=_dt.now(), chat=_chat, from_user=_user
+        )
+        cq = CallbackQuery(
+            id="cb5", from_user=_user, chat_instance="ci",
+            data=data, message=cq_msg,
+        )
+        return Update(update_id=5, callback_query=cq)
+
     check(
-        bool(_budget_menu_h.check_update(_text_update("💰 بودجه"))),
-        "💰 بودجه routes to the prompt handler",
+        bool(_settings_cb_h.check_update(_cb_update("q:💰 بودجه"))),
+        "💰 بودجه tap routes to the settings screen callback",
+    )
+    check(
+        bool(_settings_cb_h.check_update(_cb_update("nav:back:main"))),
+        "🔙 بازگشت tap routes to the back-to-menu callback",
     )
 
     def _photo_update():
@@ -1926,6 +1958,17 @@ async def main() -> int:
         result = conv.check_update(update)
         conv._conversations.clear()
         return result[2] if result else None
+
+    def _inner_fn(handler):
+        """Unwrap _tap_step/_msg_step wrappers down to the step function."""
+        wrapped = getattr(handler, "callback", None)
+        if getattr(wrapped, "__name__", "") == "_wrapped" and getattr(
+            wrapped, "__closure__", None
+        ):
+            for cell in wrapped.__closure__:
+                if callable(cell.cell_contents):
+                    return cell.cell_contents
+        return wrapped
 
     cases = [
         (journal.MARKET, "🪙 کریپتو", journal.ask_market),
@@ -1950,26 +1993,26 @@ async def main() -> int:
     for st, text, fn in cases:
         handler = _routed_to(st, _text_update(text))
         check(
-            getattr(handler, "callback", None) is fn,
+            _inner_fn(handler) is fn,
             f"PTB routes '{text}' at state {st} to {fn.__name__}",
         )
 
     handler = _routed_to(journal.SCREENSHOT, _photo_update())
     check(
-        getattr(handler, "callback", None) is journal.ask_screenshot,
+        _inner_fn(handler) is journal.ask_screenshot,
         "PTB routes a photo at SCREENSHOT to ask_screenshot",
     )
 
     handler = _routed_to(journal.ENTRY, _text_update("cancel"))
     check(
-        getattr(handler, "callback", None) is journal.cancel,
+        _inner_fn(handler) is journal.cancel,
         "typed 'cancel' mid-flow routes to cancel",
     )
 
-    handler = _routed_to(journal.CONFIRM, _text_update("✖️ لغو"))
+    handler = _routed_to(journal.ENTRY, _cb_update("q:cancel"))
     check(
-        getattr(handler, "callback", None) is journal.cancel,
-        "✖️ لغو button routes to cancel",
+        _inner_fn(handler) is journal.on_flow_cancel,
+        "✖️ لغو inline tap routes to on_flow_cancel",
     )
 
     def _entry_handler(update):
@@ -1977,26 +2020,34 @@ async def main() -> int:
         conv._conversations.clear()
         return result[2] if result else None
 
-    handler = _entry_handler(_text_update("📈 معامله جدید"))
+    handler = _entry_handler(_cb_update("menu:trade"))
     check(
-        getattr(handler, "callback", None) is journal.trade_start,
-        "📈 معامله جدید tap enters the conversation (registers SYMBOL)",
+        _inner_fn(handler) is journal.trade_start,
+        "📈 menu tap enters the conversation (registers MARKET)",
     )
     handler = _entry_handler(_text_update("/trade"))
     check(
-        getattr(handler, "callback", None) is journal.trade_start,
+        _inner_fn(handler) is journal.trade_start,
         "/trade command still enters the conversation",
     )
-    handler = _routed_to(journal.DIRECTION, _text_update("📈 معامله جدید"))
+    handler = _routed_to(journal.DIRECTION, _cb_update("menu:trade"))
     check(
-        getattr(handler, "callback", None) is journal.trade_start,
-        "📈 معامله جدید mid-conversation re-enters and restarts",
+        _inner_fn(handler) is journal.trade_start,
+        "📈 menu tap mid-conversation re-enters and restarts",
+    )
+    handler = _entry_handler(_cb_update("menu:open"))
+    open_conv = journal.build_open_conversation()
+    open_res = open_conv.check_update(_cb_update("menu:open"))
+    check(
+        open_res is not None
+        and _inner_fn(open_res[2]) is journal.open_trade_start,
+        "🟢 menu tap enters the open-trade conversation",
     )
 
     # --- ☰ menu-button command list + main menu -------------------------------
     menu_upd = FakeUpdate()
     menu_upd.text("/start")
-    await journal.show_menu(menu_upd, FakeContext())
+    await journal.show_menu(menu_upd, FakeContext(log=menu_upd.sent))
     menu_text = menu_upd.sent[-1][1]
     check(
         all(
@@ -2010,10 +2061,8 @@ async def main() -> int:
     )
     menu_kb = menu_upd.sent[-1][2]
     check(
-        isinstance(menu_kb, ReplyKeyboardMarkup)
-        and bool(menu_kb.is_persistent)
-        and not menu_kb.one_time_keyboard,
-        "main-menu keyboard is persistent (stays after taps)",
+        isinstance(menu_kb, InlineKeyboardMarkup) and menu_kb is journal._MENU_IK,
+        "main menu is the inline keyboard message (no reply bar)",
     )
     menu_labels = _labels(menu_kb)
     check(
@@ -2021,52 +2070,40 @@ async def main() -> int:
         "main-menu buttons present",
     )
 
-    menu_handlers = journal.build_menu_handlers()
+    menu_handler = journal.build_menu_callbacks()
 
-    def _menu_routes(label):
-        """Callbacks of every menu handler matching label (truthy check!)."""
-        return [
-            h.callback for h in menu_handlers if h.check_update(_text_update(label))
-        ]
+    def _menu_routes(data):
+        """The menu handler matches ONLY menu: callback taps."""
+        return menu_handler.check_update(_cb_update(data))
 
     expected_menu = {
-        "📊 آمار": journal.stats,
-        "📊 Stats": journal.stats,  # English aliases still route
-        "⚙️ تنظیمات": journal.show_settings,
-        "⚙️ Settings": journal.show_settings,
-        "🟢 معاملات باز": journal.open_trades,
-        "🟢 Open trades": journal.open_trades,
-        "🕘 معاملات اخیر": journal.recent,
-        "🕘 Recent": journal.recent,
-        "📥 اکسل": journal.export_trades,
-        "📥 Export": journal.export_trades,
-        "🏠 منو": journal.show_menu,
-        "🏠 Menu": journal.show_menu,
-        "❓ راهنما": journal.show_menu,
-        "❓ help": journal.show_menu,
+        "menu:stats": journal.stats,
+        "menu:opens": journal.open_trades,
+        "menu:recent": journal.recent,
+        "menu:export": journal.export_trades,
+        "menu:settings": journal._send_settings_screen,
+        "menu:trade": journal.trade_start,
+        "menu:open": journal.open_trade_start,
     }
-    for label, fn in expected_menu.items():
+    for data, fn in expected_menu.items():
         check(
-            _menu_routes(label) == [fn],
-            f"menu button '{label}' routes to {fn.__name__}",
+            bool(_menu_routes(data)),
+            f"menu button '{data}' routes to {fn.__name__}",
         )
     check(
-        _menu_routes("📈 ثبت معامله بسته") == [],
-        "📈 ثبت معامله بسته is handled by the conversation, not a standalone handler",
+        bool(_menu_routes("menu:noop"))
+        and menu_handler.callback is journal.on_menu_callback,
+        "every menu: tap dispatches through on_menu_callback",
     )
-    check(
-        _menu_routes("📈 بستن معامله") == [],
-        "old 📈 بستن معامله wording still routes to the conversation",
-    )
-    check(
-        _menu_routes("🟢 ثبت معامله باز") == [],
-        "🟢 ثبت معامله باز is handled by the conversation, not a standalone handler",
-    )
-
-    for label in ("hello", "new trade", "stats", "📈", "📊 stats now", "✖️", "📥"):
+    for data in ("opn:add", "opn:c:12", "q:cancel", "nav:back:main", "stat:p:1w"):
         check(
-            _menu_routes(label) == [],
-            f"non-menu text '{label}' is not routed by the menu handlers",
+            not _menu_routes(data),
+            f"non-menu callback '{data}' is not routed by the menu handler",
+        )
+    for label in ("📊 آمار", "⚙️ تنظیمات", "hello", "stats"):
+        check(
+            not menu_handler.check_update(_text_update(label)),
+            f"typed text '{label}' is not routed by the callback-only menu handler",
         )
 
     # --- stats inline callbacks: routing + real PTB handler ---------------------
@@ -2141,14 +2178,14 @@ async def main() -> int:
         getattr(handler, "callback", None) is journal.open_trades_add_entry,
         "➕ panel button enters the open conversation (entry point)",
     )
-    handler = _open_entry(_text_update("🟢 ثبت معامله باز"))
+    handler = _open_entry(_cb_update("menu:open"))
     check(
-        getattr(handler, "callback", None) is journal.open_trade_start,
-        "🟢 ثبت معامله باز menu button starts the open questionnaire directly",
+        _inner_fn(handler) is journal.open_trade_start,
+        "🟢 ثبت معامله باز menu tap starts the open questionnaire directly",
     )
     handler = _open_entry(_text_update("/open"))
     check(
-        getattr(handler, "callback", None) is journal.open_trade_start,
+        _inner_fn(handler) is journal.open_trade_start,
         "/open starts the open questionnaire (/opens is the panel)",
     )
     check(
@@ -2195,7 +2232,7 @@ async def main() -> int:
     for st, text, fn in open_cases:
         handler = _routed_open(st, _text_update(text))
         check(
-            getattr(handler, "callback", None) is fn,
+            _inner_fn(handler) is fn,
             f"open conv routes '{text}' to {fn.__name__}",
         )
 
@@ -2213,7 +2250,7 @@ async def main() -> int:
     )
     handler = _close_entry(_text_update("/close 12"))
     check(
-        getattr(handler, "callback", None) is journal.close_start_text,
+        _inner_fn(handler) is journal.close_start_text,
         "/close <id> enters the close conversation",
     )
 
@@ -2239,7 +2276,7 @@ async def main() -> int:
     for st, text, fn in close_cases:
         handler = _routed_close(st, _text_update(text))
         check(
-            getattr(handler, "callback", None) is fn,
+            _inner_fn(handler) is fn,
             f"close conv routes '{text}' to {fn.__name__}",
         )
 
@@ -2256,12 +2293,13 @@ async def main() -> int:
         "export taps don't leak into conversation answers",
     )
     check(
-        _menu_routes("✅ Win") == [] and _menu_routes("❌ Loss") == [],
+        not menu_handler.check_update(_text_update("✅ Win"))
+        and not menu_handler.check_update(_text_update("❌ Loss")),
         "result buttons are conversation answers, not menu labels",
     )
     handler = _routed_to(journal.RESULT, _text_update("➖ BE"))
     check(
-        getattr(handler, "callback", None) is journal.ask_result,
+        _inner_fn(handler) is journal.ask_result,
         "BE button routes to ask_result",
     )
 

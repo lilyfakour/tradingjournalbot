@@ -32,10 +32,10 @@ data and the spreadsheet column layout keep working.
 | `/export` | Download all trades as an `.xlsx` spreadsheet |
 | `/cancel` | Abort the current `/trade` entry |
 
-## Keyboard buttons
+## Inline buttons
 
-Inside `/trade` the choices appear as **reply-keyboard buttons under the
-message input field** (at the bottom of the screen):
+Inside `/trade` (and the open/close questionnaires) every choice appears as an
+**inline button attached to the bot's own message**:
 
 - **بازار** — 🪙 کریپتو / 💵 فارکس (first step; the margin question adapts:
   USDT vs USD حساب فارکس)
@@ -46,7 +46,7 @@ message input field** (at the bottom of the screen):
 - Entry, 🎯 Take Profit (TP), 🛑 Stop Loss (SL) — typed prices
 - نتیجه معامله — **✅ Win / ❌ Loss / ➖ BE** (Win sets exit = TP, Loss sets
   exit = SL, BE sets exit = entry; the result also drives the auto P&L)
-- 💰 Margin — how much money you committed to the trade
+- 💰 Margin — typed amount, or 🧮 محاسبه خودکار (budget × risk %)
 - ⚠️ Risk — the percent of your account risked (`0.5% 1% 2% 3% 5% 10%`,
   typed values, or ⏭ بدون درصد). **P&L is auto-calculated** from margin,
   leverage and the exit price — no extra question
@@ -56,31 +56,32 @@ message input field** (at the bottom of the screen):
   انتقامی (plain professional labels; tap one, type it, or ⏭ رد کردن);
   stored with the trade and shown in `/recent` and the stats breakdown
 - 📝 دلیل ورود (why you entered) instead of a generic notes field
-- 📅 Today's date
 - ⏭ بدون دلیل / ⏭ بدون اسکرین‌شات
 - ✅ ذخیره / ❌ ثبت نشود
-- ✖️ لغو on every choice screen (or send `/cancel`)
+- ✖️ لغو on every question (or send `/cancel`)
 
-Tapping a button sends its label as a normal message, so typed answers work
-everywhere too (`l`/`s` for direction, `win`/`lose`/`be`/`breakeven` for the
-result, `5min`/`daily`/`weekly` for timeframes, `-` as the universal skip
-shortcut). The keyboard hides itself for the free-text fields (symbol,
-prices, margin, custom date, notes).
+**Each question message is deleted as soon as it is answered** — the chat
+stays clean, one question at a time. Tapping a button and typing the same
+answer are equivalent (`l`/`s` for direction, `win`/`lose`/`be`/`breakeven`
+for the result, `5min`/`daily`/`weekly` for timeframes, `-` as the universal
+skip shortcut). The old reply-keyboard bar under the input field is gone.
 
 ## Menu
 
 - The **☰ button next to the message bar** opens the bot's command list —
   every command with a short emoji explanation. It is registered
   automatically when the bot starts (`set_my_commands`).
-- `/start`, `/help` or the 🏠 منو button send the **main-menu keyboard** —
-  persistent buttons under the input bar: 📈 ثبت معامله بسته · **🟢 ثبت معامله باز** /
-  🟢 معاملات باز · 📊 آمار / 🕘 معاملات اخیر · 📥 اکسل / ⚙️ تنظیمات · 🏠 منو.
-  The closed-trade button is labeled «ثبت معامله بسته» — it logs a trade that
-  was already exited (/trade) — so it can never be confused with the open-trade
-  one; 📈 ثبت معامله بسته and 🟢 ثبت معامله باز safely restart their questionnaires
-  even mid-entry, and ⚙️ تنظیمات opens the settings panel (budget). The bar is
-  re-sent after saving, discarding or cancelling an entry, so the buttons
-  never disappear (no `/start` needed).
+- `/start` and `/help` send the **main menu as a message with inline
+  buttons**: 📈 ثبت معامله بسته · 🟢 ثبت معامله باز / 🟢 معاملات باز · 📊 آمار /
+  🕘 معاملات اخیر · 📥 اکسل / ⚙️ تنظیمات. The closed-trade button is labeled
+  «ثبت معامله بسته» — it logs a trade that was already exited (/trade) — so it
+  can never be confused with the open-trade one. The menu message **stays in
+  place** while secondary screens open on top of it, and 📈 / 🟢 safely restart
+  their questionnaires even mid-entry.
+- Every secondary screen (⚙️ تنظیمات → 💰 بودجه, and the 🏠 Home button of the
+  📊/🕘/🟢 panels) **drills down**: the current screen is deleted and the next
+  one appears, with a **🔙 بازگشت** row that deletes the screen and shows the
+  main menu again (freshly re-sent if its message is gone).
 
 ## Stats panel
 

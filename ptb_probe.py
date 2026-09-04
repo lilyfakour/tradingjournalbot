@@ -28,14 +28,31 @@ class StubBot(Bot):
     def __init__(self):
         super().__init__(token="123456:TESTTOKEN")
         self._sent = []
+        self._deleted = []   # message ids deleted (question messages)
 
     @property
     def sent(self):
         return self._sent
 
+    @property
+    def deleted(self):
+        return self._deleted
+
     async def send_message(self, chat_id=None, text=None, **kw):
+        self._n = getattr(self, "_n", 500) + 1
+        msg = Message(
+            message_id=self._n,
+            date=datetime.now(),
+            chat=Chat(id=chat_id or 0, type=Chat.PRIVATE),
+            text=text,
+        )
+        msg.set_bot(self)
         self._sent.append(text)
-        return None
+        return msg
+
+    async def delete_message(self, chat_id=None, message_id=None, **kw):
+        self._deleted.append(message_id)
+        return True
 
     async def answer_callback_query(self, callback_query_id=None, **kw):
         return True
@@ -51,6 +68,17 @@ def tap(stub, user, chat, data, oid=1):
     upd = Update(update_id=oid, callback_query=cq)
     upd.set_bot(stub)
     return upd
+
+
+def tap_and_run(conv, app, user, data, oid):
+    """Drive an inline-button tap through real conversation dispatch."""
+    upd = tap(app.bot, user, Chat(id=user.id, type=Chat.PRIVATE), data, oid)
+    res = conv.check_update(upd)
+    assert res, f"tap {data!r} not routed at state {conv._conversations}"
+    ctx = app.context_types.context.from_update(upd, app)
+    ctx._user_id = user.id
+    ctx._chat_id = user.id
+    return ctx
 
 
 def text_up(stub, user, chat, text, oid=99):
@@ -193,6 +221,41 @@ async def main():
     assert "+$16.67" in detail2 and "+33.34%" in detail2, detail2
     assert "10x" in detail2, detail2
     print("PASS  detail card shows the real margin, leverage and P&L")
+
+    # 7) the /trade flow through INLINE taps — the new primary interaction
+    #    (menu entry, per-tap question deletion, inline cancel).
+    tconv = journal.build_conversation()
+    tkey = tconv._get_key(text_up(stub, user, chat, "long", 30))
+
+    async def tstep(data, oid, text=None):
+        if data is not None:
+            u = tap(stub, user, chat, data, oid)
+        else:
+            u = text_up(stub, user, chat, text, oid)
+        r = tconv.check_update(u)
+        assert r, f"no route for {data or text!r} at {tconv._conversations.get(tkey)}"
+        cx = app.context_types.context.from_update(u, app)
+        await cx.refresh_data()
+        await tconv.handle_update(u, app, r, cx)
+        return tconv._conversations.get(tkey), cx
+
+    st, cx = await tstep("menu:trade", 31)
+    assert st == journal.MARKET and cx.user_data.get("_flow_q"), (st, cx.user_data)
+    fq = cx.user_data["_flow_q"]
+    st, cx = await tstep("q:🪙 کریپتو", fq)
+    assert st == journal.SYMBOL and fq in stub.deleted, (st, stub.deleted)
+    print("PASS  menu:trade tap -> MARKET; market tap deletes its question")
+
+    st, cx = await tstep(None, 32, text="EURUSD")
+    assert st == journal.DIRECTION, st
+    st, cx = await tstep("q:📈 Long", 33)
+    assert st == journal.LEVERAGE, st
+    print("PASS  typed symbol and 📈 Long tap route through real dispatch")
+
+    st, cx = await tstep("q:cancel", 34)
+    assert st is None and cx.user_data.get("_flow_q") is None, (st, cx.user_data)
+    assert 34 in stub.deleted
+    print("PASS  ✖️ لغو tap ends the /trade flow and deletes the question")
 
     print("ALL PROBES PASSED")
 

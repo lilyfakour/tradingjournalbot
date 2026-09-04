@@ -1,9 +1,12 @@
-"""Guided /trade conversation (reply-keyboard prompts) plus the open-trades
+"""Guided /trade conversation (inline-button questions) plus the open-trades
 flow, the /recent, /open, /stats and /delete commands.
 
-Choices are offered as reply-keyboard buttons — the buttons that appear under
-the message input field at the bottom of the screen. Tapping one sends its
-label as a normal text message, so typed answers work everywhere too. A chart
+Every choice is offered as an INLINE BUTTON attached to the bot's own message —
+each question message is deleted the moment it is answered, so the chat reads
+like a clean step-by-step menu. Typed answers still work everywhere. The main
+menu (sent by /start) is a welcome message with inline buttons that stays in
+place; secondary screens (⚙️ settings, stats/recent/open panels) carry a
+🔙 بازگشت row that deletes the screen and shows the menu again. A chart
 screenshot can be attached near the end of the questionnaire and is later
 reachable through the 📷 button on the trade's detail card in /recent.
 
@@ -29,8 +32,10 @@ from pathlib import Path
 from typing import Optional
 
 from telegram import (
+    Chat,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     Update,
@@ -143,6 +148,282 @@ _MENU_RE = re.compile(
     re.IGNORECASE,
 )
 _ANSWER = _TEXT & ~filters.Regex(_CANCEL_RE) & ~filters.Regex(_MENU_RE)
+# --------------------------------------------------------------------------
+# Inline UI primitives — every screen and question is a message with inline
+# buttons; the reply-keyboard bar is gone. Questions are deleted right after
+# they are answered; screens drill down (delete current, send next) while the
+# main menu message stays in place.
+# --------------------------------------------------------------------------
+
+def _ik(rows: list[list]) -> InlineKeyboardMarkup:
+    """Inline keyboard from rows of labels or buttons.
+
+    Plain labels become buttons whose callback data is the label prefixed
+    with "q:" (the question-answer namespace the conversation states match);
+    InlineKeyboardButton objects pass through untouched.
+    """
+    return InlineKeyboardMarkup(
+        [
+            [
+                (
+                    InlineKeyboardButton(label, callback_data="q:" + label)
+                    if isinstance(label, str)
+                    else label
+                )
+                for label in row
+            ]
+            for row in rows
+        ]
+    )
+
+
+_CANCEL_IK_ROW = [InlineKeyboardButton("✖️ لغو", callback_data="q:cancel")]
+_Q_CANCEL_CB_RE = re.compile(r"^q:cancel$")
+# A question answer is a q: tap that is NOT q:cancel (the cancel row goes to
+# the conversation fallback, not to the step parser).
+_Q_CB_RE = re.compile(r"^q:(?!cancel)")
+_BACK_FLOW_ROW = [InlineKeyboardButton("🔙 بازگشت", callback_data="nav:back:flow")]
+_BACK_MAIN_ROW = [InlineKeyboardButton("🔙 بازگشت", callback_data="nav:back:main")]
+_BACK_SETTINGS_ROW = [
+    InlineKeyboardButton("🔙 بازگشت", callback_data="nav:back:settings")
+]
+_SETTINGS_CB_RE = re.compile(r"^(?:q:💰 بودجه|nav:back:(?:main|settings))$")
+_BACK_SETTINGS_CB = "nav:back:settings"
+
+# Leverage / timeframe quick choices (inline rows).
+_LEV_BUTTONS = [
+    ["×2", "×3", "×5"],
+    ["×10", "×20", "×50"],
+    ["×100", "×125", "⏭ بدون اهرم"],
+]
+_TF_BUTTONS = [["1m", "5m", "15m"], ["30m", "1h", "4h"], ["1D", "1W", "1M"]]
+
+
+def _lev_keyboard() -> InlineKeyboardMarkup:
+    """Leverage quick-choice rows (inline, with skip + cancel)."""
+    return _ik(_LEV_BUTTONS + [_CANCEL_IK_ROW])
+
+
+_SHOT_KEYBOARD = _ik([["⏭ بدون اسکرین‌شات"], _CANCEL_IK_ROW])
+
+
+async def _show_screen(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    key: str,
+    text: str,
+    markup: InlineKeyboardMarkup,
+) -> None:
+    """Send a screen message, deleting any stale copy of the same screen."""
+    screens = context.user_data.setdefault("_screens", {})
+    old = screens.pop(key, None)
+    if old:
+        try:
+            await context.bot.delete_message(chat_id, old)
+        except Exception:
+            logger.info("Stale %s screen message could not be deleted.", key)
+    msg = await context.bot.send_message(
+        chat_id, text, reply_markup=markup, parse_mode=ParseMode.HTML
+    )
+    screens[key] = msg.message_id
+
+
+async def _drop_screen_message(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, key: str
+) -> None:
+    """Forget and delete a screen message (best-effort)."""
+    screens = context.user_data.setdefault("_screens", {})
+    old = screens.pop(key, None)
+    if old:
+        try:
+            await context.bot.delete_message(chat_id, old)
+        except Exception:
+            logger.info("%s screen message could not be deleted.", key)
+
+
+def _reset_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear the flow draft but keep the screen bookkeeping (_screens)."""
+    screens = context.user_data.get("_screens")
+    context.user_data.clear()
+    if screens is not None:
+        context.user_data["_screens"] = screens
+
+
+def _cb_text_update(update: Update, text: str) -> Update:
+    """A real text-message Update built from a callback tap.
+
+    Lets the existing message-based handlers (panels, flow starts) run
+    unchanged when their button now lives on an inline keyboard.
+    """
+    user = update.effective_user
+    chat = update.effective_chat
+    query = update.callback_query
+    message_id = query.message.message_id if query.message is not None else 1
+    msg = Message(
+        message_id=message_id,
+        date=datetime.now(),
+        chat=chat,
+        from_user=user,
+        text=text,
+    )
+    bot = update.get_bot()
+    msg.set_bot(bot)
+    synthesized = Update(update_id=1, message=msg)
+    synthesized.set_bot(bot)
+    return synthesized
+
+
+def _cb_to(fn):
+    """Adapt an inline tap to a message-based handler (answer + synthesize)."""
+
+    async def _wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        label = query.data or ""
+        await query.answer()
+        return await fn(_cb_text_update(update, label), context)
+
+    return _wrapped
+
+
+async def _q_send(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+) -> None:
+    """Send a flow question (with its inline buttons) and remember its id.
+
+    The question is deleted as soon as it is answered (see _q_drop), so the
+    chat reads like a clean step-by-step menu instead of a wall of prompts.
+    """
+    msg = await update.effective_chat.send_message(
+        text, reply_markup=reply_markup, parse_mode=ParseMode.HTML
+    )
+    if msg is not None and getattr(msg, "message_id", None):
+        context.user_data["_flow_q"] = msg.message_id
+
+
+async def _q_drop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete the current flow question (best-effort)."""
+    mid = context.user_data.pop("_flow_q", None)
+    chat = update.effective_chat
+    if mid is not None and chat is not None and context.bot is not None:
+        try:
+            await context.bot.delete_message(chat.id, mid)
+        except Exception:
+            logger.info("Flow question could not be deleted.")
+
+
+def _msg_step(fn):
+    """Typed-answer wrapper: drop the question, then run the step parser."""
+
+    async def _wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await _q_drop(update, context)
+        return await fn(update, context)
+
+    return _wrapped
+
+
+def _tap_step(fn):
+    """Inline-tap wrapper: answer, drop the question, run the step parser."""
+
+    async def _wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        label = query.data or ""
+        # Question buttons carry the "q:" namespace prefix (see _ik) — the
+        # step parsers must see the plain label, exactly like a typed answer.
+        if label.startswith("q:"):
+            label = label[2:]
+        await query.answer()
+        await _q_drop(update, context)
+        return await fn(_cb_text_update(update, label), context)
+
+    return _wrapped
+
+
+async def on_back_main(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """🔙 بازگشت on a secondary screen — back to the main menu.
+
+    Level-1 back: the screen message goes away and the main-menu message is
+    shown again (freshly, if its message is gone).
+    """
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id
+    await _drop_screen_message(context, chat_id, "settings")
+    await _drop_screen_message(context, chat_id, "budget")
+    await _ensure_menu(update, context)
+
+
+def _build_keyboards() -> None:
+    """(Re)build the inline keyboards (import time, after the primitives)."""
+    global _DIR_KEYBOARD, _TF_KEYBOARD, _CONFIRM_KEYBOARD, _STATUS_KEYBOARD
+    _DIR_KEYBOARD = _ik([["📈 Long", "📉 Short"], _CANCEL_IK_ROW])
+    _TF_KEYBOARD = _ik([*_TF_BUTTONS, _CANCEL_IK_ROW])
+    _CONFIRM_KEYBOARD = _ik([["✅ ذخیره", "❌ ثبت نشود"], _CANCEL_IK_ROW])
+    _STATUS_KEYBOARD = _ik(
+        [
+            ["✅ Win (TP)", "❌ Loss (SL)"],
+            ["➖ BE", "✏️ Manual"],
+            _CANCEL_IK_ROW,
+        ]
+    )
+
+
+_build_keyboards()
+
+
+# --------------------------------------------------------------------------
+# Main menu — a welcome MESSAGE with inline buttons (sent by /start /help).
+# --------------------------------------------------------------------------
+MENU_TEXT = (
+    "📈 /trade — ثبت معاملهٔ بسته‌شده (بعد از خروج از معامله)\n"
+    "🟢 /open — ثبت معاملهٔ باز (معامله‌ای که همین الان در آن هستی)\n"
+    "🟢 /opens — معاملات باز: دیدن، بستن یا حذف معامله‌های جاری\n"
+    "🕘 /recent — معاملات اخیر، صفحه‌بندی‌شده (۱۰ تای آخر در هر صفحه)\n"
+    "📊 /stats — آمار عملکرد؛ فیلتر بازه زمانی و نماد با دکمه‌های داخل پیام\n"
+    "⚙️ /settings — تنظیمات؛ بودجهٔ حساب (USD) برای محاسبهٔ مارجین و ریسک\n"
+    "📥 /export — دریافت همه معاملات به‌صورت فایل اکسل\n"
+    "🗑 /delete <id> — حذف یک معامله\n"
+    "✖️ /cancel — لغو ثبت جاری\n\n"
+    "برای شروع یکی از دکمه‌های زیر را بزنید؛ در هر مرحله می‌توانید به‌جای "
+    "دکمه، پاسخ را تایپ کنید."
+)
+
+# The main menu is a MESSAGE with inline buttons (no reply bar anymore).
+_MENU_IK = InlineKeyboardMarkup(
+    [
+        [
+            InlineKeyboardButton(
+                "📈 ثبت معامله بسته", callback_data="menu:trade"
+            ),
+            InlineKeyboardButton(
+                "🟢 ثبت معامله باز", callback_data="menu:open"
+            ),
+        ],
+        [
+            InlineKeyboardButton("🟢 معاملات باز", callback_data="menu:opens"),
+            InlineKeyboardButton("📊 آمار", callback_data="menu:stats"),
+        ],
+        [
+            InlineKeyboardButton("🕘 معاملات اخیر", callback_data="menu:recent"),
+            InlineKeyboardButton("📥 اکسل", callback_data="menu:export"),
+        ],
+        [InlineKeyboardButton("⚙️ تنظیمات", callback_data="menu:settings")],
+    ]
+)
+
+_MAIN_MENU_KEY = "main"
+_CB_MENU = "menu:"  # callback-data prefix of every main-menu button
+
+
+async def show_settings(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """/settings — the settings screen (alias used by bot.py)."""
+    await _send_settings_screen(update, context)
 
 _LONG_ALIASES = {"long", "l", "buy", "b", "📈 long", "خرید", "📈 خرید"}
 _SHORT_ALIASES = {"short", "s", "sell", "📉 short", "فروش", "📉 فروش"}
@@ -264,57 +545,38 @@ def _rk(rows: list[list[str]], one_time: bool = True) -> ReplyKeyboardMarkup:
 
 
 _CANCEL_ROW = ["✖️ لغو"]
-_MARKET_KEYBOARD = _rk([["🪙 کریپتو", "💵 فارکس"], _CANCEL_ROW])
-_DIR_KEYBOARD = _rk([["📈 Long", "📉 Short"], _CANCEL_ROW])
-_TF_BUTTONS = [["1m", "5m", "15m"], ["30m", "1h", "4h"], ["1D", "1W", "1M"]]
-_TF_KEYBOARD = _rk([*_TF_BUTTONS, _CANCEL_ROW])
-_LEV_KEYBOARD = _rk(
-    [
-        ["×2", "×3", "×5"],
-        ["×10", "×20", "×50"],
-        ["×100", "×125", "⏭ بدون اهرم"],
-        _CANCEL_ROW,
-    ]
-)
-_RESULT_KEYBOARD = _rk(
-    [["✅ Win", "❌ Loss", "➖ BE"], _CANCEL_ROW]
-)
-_RISK_KEYBOARD = _rk(
-    [
-        ["0.5%", "1%", "2%"],
-        ["3%", "5%", "10%"],
-        ["⏭ بدون درصد"],
-        _CANCEL_ROW,
-    ]
-)
+_MARKET_KEYBOARD = _ik([["🪙 کریپتو", "💵 فارکس"], _CANCEL_IK_ROW])
+_RESULT_KEYBOARD = _ik([["✅ Win", "❌ Loss", "➖ BE"], _CANCEL_IK_ROW])
+_RISK_KEYBOARD = _ik([["0.5%", "1%", "2%"], ["3%", "5%", "10%"], ["⏭ بدون درصد"], _CANCEL_IK_ROW])
 # The margin question (budget feature): a 🧮 button auto-calculates the
 # margin from the configured budget and the risk % entered a step earlier.
 MARGIN_AUTO_BTN = "🧮 محاسبه خودکار"
 MARGIN_AUTO_FIX_BTN = "✅ پیشنهاد ربات"
 MARGIN_KEEP_BTN = "✍️ عدد خودم"
-_OPEN_MARGIN_KEYBOARD = _rk([[MARGIN_AUTO_BTN], _CANCEL_ROW])
-_MARGIN_CONFLICT_KEYBOARD = _rk(
-    [[MARGIN_AUTO_FIX_BTN, MARGIN_KEEP_BTN], _CANCEL_ROW]
+_OPEN_MARGIN_KEYBOARD = _ik([[MARGIN_AUTO_BTN], _CANCEL_IK_ROW])
+_MARGIN_CONFLICT_KEYBOARD = _ik(
+    [[MARGIN_AUTO_FIX_BTN, MARGIN_KEEP_BTN], _CANCEL_IK_ROW]
 )
-_DATE_KEYBOARD = _rk([["📅 امروز"], _CANCEL_ROW])
-_STATUS_KEYBOARD = _rk(
-    [["✅ Win (TP)", "❌ Loss (SL)"], ["➖ BE", "✏️ Manual"], _CANCEL_ROW]
-)
-_OPEN_CONFIRM_KEYBOARD = _rk([["✅ ثبت", "❌ ثبت نشود"], _CANCEL_ROW])
-_SETTINGS_KEYBOARD = _rk(
-    [
-        ["💰 بودجه"],
-        ["🏠 منو"],
-    ]
-)
-_HOUR_KEYBOARD = _rk(
-    [
-        ["00", "03", "06", "09"],
-        ["12", "15", "18", "21"],
-        ["🕐 الان", "⏭ رد کردن"],
-        _CANCEL_ROW,
-    ]
-)
+
+
+def _symbol_keyboard() -> Optional[InlineKeyboardMarkup]:
+    """Inline keyboard offering the most used and recently traded symbols."""
+    recent, top = db.get_symbol_suggestions()
+    rows: list[list] = []
+    shown: set[str] = set()
+    if top:
+        rows.append(top)
+        shown.update(top)
+    extra = [symbol for symbol in recent if symbol not in shown]
+    if extra:
+        rows.append(extra)
+    if not rows:
+        return None
+    rows.append(list(_CANCEL_IK_ROW))
+    return _ik(rows)
+_DATE_KEYBOARD = _ik([["📅 امروز"], _CANCEL_IK_ROW])
+_OPEN_CONFIRM_KEYBOARD = _ik([["✅ ثبت", "❌ ثبت نشود"], _CANCEL_IK_ROW])
+_HOUR_KEYBOARD = _ik([["00", "03", "06", "09"], ["12", "15", "18", "21"], ["🕐 الان", "⏭ رد کردن"], _CANCEL_IK_ROW])
 
 # Predetermined moods: button label -> value stored in the database.
 # Professional plain-word labels (no emojis), Latin technical terms kept.
@@ -344,103 +606,73 @@ _MOOD_ALIASES = {
     for alias in (label.lower(), value)
 }
 _MOOD_ALIASES["فومو"] = "fomo"  # Persian spelling of FOMO
-_MOOD_KEYBOARD = _rk(
+_MOOD_KEYBOARD = _ik(
     [
-        list(_MOODS)[i : i + 2]
-        for i in range(0, len(_MOODS), 2)
+        list(_MOODS)[i : i + 2] for i in range(0, len(_MOODS), 2)
     ]
-    + [["⏭ رد کردن"], _CANCEL_ROW]
+    + [["⏭ رد کردن"], _CANCEL_IK_ROW]
 )
-_NOTES_KEYBOARD = _rk([["⏭ بدون دلیل"], _CANCEL_ROW])
-_SHOT_KEYBOARD = _rk([["⏭ بدون اسکرین‌شات"], _CANCEL_ROW])
-_SHOT2_KEYBOARD = _rk([["⏭ بدون اسکرین‌شات"], _CANCEL_ROW])
-_CONFIRM_KEYBOARD = _rk([["✅ ذخیره", "❌ ثبت نشود"], _CANCEL_ROW])
-# Sent during plain-typing steps so the screen stays clean; the menu bar
-# comes back only when the flow ends (save/discard/cancel).
-_KEYBOARD_GONE = ReplyKeyboardRemove()
-
-
-def _symbol_keyboard() -> Optional[ReplyKeyboardMarkup]:
-    """Reply keyboard offering the most used and recently traded symbols."""
-    recent, top = db.get_symbol_suggestions()
-    rows: list[list[str]] = []
-    shown: set[str] = set()
-    if top:
-        rows.append(top)
-        shown.update(top)
-    extra = [symbol for symbol in recent if symbol not in shown]
-    if extra:
-        rows.append(extra)
-    if not rows:
-        return None
-    rows.append(list(_CANCEL_ROW))
-    return _rk(rows)
-
-
-# --------------------------------------------------------------------------
-# Main menu (sent by /start and the 🏠 Menu button)
-# --------------------------------------------------------------------------
-
-MENU_TEXT = (
-    "📈 /trade — ثبت معاملهٔ بسته‌شده (بعد از خروج از معامله)\n"
-    "🟢 /open — ثبت معاملهٔ باز (معامله‌ای که همین الان در آن هستی)\n"
-    "🟢 /opens — معاملات باز: دیدن، بستن یا حذف معامله‌های جاری\n"
-    "🕘 /recent — معاملات اخیر، صفحه‌بندی‌شده (۱۰ تای آخر در هر صفحه؛ برای جزئیات روی معامله بزنید)\n"
-    "📊 /stats — آمار عملکرد؛ فیلتر بازه زمانی و نماد با دکمه‌های داخل پیام\n"
-    "⚙️ /settings — تنظیمات؛ بودجهٔ حساب (USD) برای محاسبهٔ مارجین و ریسک\n"
-    "📥 /export — دریافت همه معاملات به‌صورت فایل اکسل\n"
-    "🗑 /delete <id> — حذف یک معامله\n"
-    "✖️ /cancel — لغو ثبت جاری\n\n"
-    "هر انتخاب به‌صورت دکمه در پایین صفحه نمایش داده می‌شود؛ هر جا لازم بود "
-    "می‌توانید مقدار را تایپ کنید. در پایان هم می‌توانید اسکرین‌شات قبل و بعد "
-    "از معامله را ضمیمه کنید. برای شروع یکی از دکمه‌های زیر را بزنید."
-)
-
-# The persistent main-menu bar. Every flow ends by re-sending it so the
-# buttons never disappear (one-time question keyboards vanish after a tap).
-# 🟢 ثبت معامله باز starts the open-trade questionnaire straight away;
-# 🟢 معاملات باز opens the panel where running positions are closed/deleted;
-# 📈 ثبت معامله بسته logs a trade that has already been exited (/trade).
-_MENU_KEYBOARD = _rk(
-    [
-        ["📈 ثبت معامله بسته", "🟢 ثبت معامله باز"],
-        ["🟢 معاملات باز", "📊 آمار"],
-        ["🕘 معاملات اخیر", "📥 اکسل"],
-        ["⚙️ تنظیمات", "🏠 منو"],
-    ],
-    one_time=False,
-)
+_NOTES_KEYBOARD = _ik([["⏭ بدون دلیل"], _CANCEL_IK_ROW])
 
 
 async def show_menu(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Send the welcome text and the main-menu keyboard (also /start)."""
+    """Send the welcome text and the inline main menu (also /start).
+
+    Tracked as the "main" screen so a re-send replaces a stale copy instead
+    of stacking duplicate menus.
+    """
     user = getattr(update, "effective_user", None)
     name = (getattr(user, "first_name", "") or "").strip()
-    hello = f"سلام {name}!\n" if name else "سلام!\n"
-    await update.effective_chat.send_message(
-        hello + MENU_TEXT, reply_markup=_MENU_KEYBOARD
+    hello = f"سلام {name}! 👋\n\n" if name else "سلام! 👋\n\n"
+    await _show_screen(
+        context,
+        update.effective_chat.id,
+        _MAIN_MENU_KEY,
+        hello + MENU_TEXT,
+        _MENU_IK,
     )
 
 
-def build_menu_handlers() -> list[MessageHandler]:
-    """Handlers for the menu buttons that run outside the conversation.
+_MAIN_MENU_KEY = "main"
+_CB_MENU = "menu:"  # callback-data prefix of every main-menu button
 
-    📈 New trade is deliberately NOT here — it is an entry point of the
-    conversation itself so that a tap properly registers the SYMBOL state.
-    """
-    return [
-        MessageHandler(filters.Regex(_STATS_RE), stats),
-        MessageHandler(filters.Regex(_RECENT_RE), recent),
-        # 🟢 معاملات باز opens the open-trades PANEL here (not the
-        # questionnaire — adding happens through the panel's ➕ button).
-        MessageHandler(filters.Regex(_OPEN_RE), open_trades),
-        MessageHandler(filters.Regex(_EXPORT_RE), export_trades),
-        MessageHandler(filters.Regex(_SETTINGS_RE), show_settings),
-        MessageHandler(filters.Regex(_MENU_HELP_RE), show_menu),
-        MessageHandler(filters.Regex(_MENU_HOME_RE), show_menu),
-    ]
+
+async def on_menu_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Dispatch the inline main-menu taps (the menu message itself stays)."""
+    query = update.callback_query
+    action = (query.data or "")[len(_CB_MENU):]
+    await query.answer()
+    synth = _cb_text_update(update, f"{_CB_MENU}{action}")
+    if action == "trade":
+        await trade_start(synth, context)
+    elif action == "open":
+        await open_trade_start(synth, context)
+    elif action == "opens":
+        await open_trades(synth, context)
+    elif action == "stats":
+        await stats(synth, context)
+    elif action == "recent":
+        await recent(synth, context)
+    elif action == "export":
+        await export_trades(synth, context)
+    elif action == "settings":
+        await _send_settings_screen(update, context)
+
+
+async def _ensure_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Show the main-menu message again (back navigation needs it)."""
+    await show_menu(update, context)
+
+
+def build_menu_callbacks() -> CallbackQueryHandler:
+    """Handler for the inline main-menu buttons."""
+    return CallbackQueryHandler(on_menu_callback, pattern="^" + re.escape(_CB_MENU))
 
 
 async def export_trades(
@@ -455,7 +687,6 @@ async def export_trades(
             document,
             filename=path.name,
             caption=f"📊 {path.stem} — همه معاملات",
-            reply_markup=_MENU_KEYBOARD,
         )
     path.unlink(missing_ok=True)  # sent; don't leave copies on disk
 
@@ -465,10 +696,6 @@ async def export_trades(
 # The budget feeds the open questionnaire's auto-margin calculation.
 # --------------------------------------------------------------------------
 _BUDGET_RE = re.compile(r"^\s*💰\s*(?:budget|بودجه)\s*$", re.IGNORECASE)
-# What the trader may send as the budget value: the explicit "budget 500"
-# style, a bare number (right after the 💰 prompt), or a clear word. The
-# prompt-armed gate lives in the callback, not in the filter — filters see
-# only the update, so a wide filter + callback gate is the reliable split.
 _BUDGET_VALUE_RE = re.compile(
     r"^\s*(?:"
     r"(?:⚙️\s*)?budget\s*(?::|=\s*|\s)\s*(?P<explicit>\d+(?:\.\d+)?)"
@@ -480,48 +707,86 @@ _BUDGET_VALUE_RE = re.compile(
 )
 
 
-async def show_settings(
+async def _send_settings_screen(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Send the settings panel (⚙️ تنظیمات button, /settings)."""
+    """⚙️ تنظیمات screen — a first-level screen (the main menu stays)."""
     budget = db.get_budget()
     if budget:
         body = (
-            f"• 💰 بودجهٔ حساب: <b>{_fmt_num(budget)} $</b>\n"
-            "\n"
+            f"• 💰 بودجهٔ حساب: <b>{_fmt_num(budget)} $</b>\n\n"
             "این عدد برای دکمهٔ 🧮 محاسبهٔ خودکار در مرحلهٔ مارجینِ "
             "«ثبت معامله باز» استفاده می‌شود:\n"
             "مارجین = بودجه × درصد ریسک ÷ ۱۰۰"
         )
     else:
         body = (
-            "• 💰 بودجهٔ حساب: <b>—</b> (هنوز تنظیم نشده)\n"
-            "\n"
+            "• 💰 بودجهٔ حساب: <b>—</b> (هنوز تنظیم نشده)\n\n"
             "برای استفاده از دکمهٔ 🧮 محاسبهٔ خودکار مارجین، اول بودجه را "
             "وارد کنید."
         )
-    await update.effective_chat.send_message(
+    await _show_screen(
+        context,
+        update.effective_chat.id,
+        "settings",
         "⚙️ <b>تنظیمات</b>\n\n" + body,
-        reply_markup=_SETTINGS_KEYBOARD,
-        parse_mode=ParseMode.HTML,
+        _ik([["💰 بودجه"], _BACK_MAIN_ROW]),
     )
 
 
-async def settings_budget(
+async def _send_budget_screen(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """💰 بودجه tapped (or /settings budget ...) — prompt for the number."""
+    """💰 بودجه screen — drills into settings (the settings screen goes)."""
+    chat_id = update.effective_chat.id
+    await _drop_screen_message(context, chat_id, "settings")
     budget = db.get_budget()
     current = f"{_fmt_num(budget)} $" if budget else "—"
     # Arm the free-number listener (expires, see _budget_armed below): the
     # next bare number sent soon after this prompt becomes the budget.
     context.user_data["_budget_prompt"] = datetime.now().timestamp()
-    await update.effective_chat.send_message(
-        f"💰 بودجهٔ فعلی: <b>{current}</b>\n\n"
+    await _show_screen(
+        context,
+        chat_id,
+        "budget",
+        f"💰 <b>بودجهٔ فعلی: {current}</b>\n\n"
         "عدد بودجه را به دلار بفرستید (مثلاً 500 یا 1250.50) "
         "یا «حذف» برای پاک کردن:",
-        parse_mode=ParseMode.HTML,
+        _ik([_BACK_SETTINGS_ROW]),
     )
+
+
+async def _settings_go_back(update: Update, context) -> None:
+    """🔙 from 💰 → settings screen; 🔙 from settings → main menu."""
+    chat_id = update.effective_chat.id
+    if update.callback_query.data == _BACK_SETTINGS_CB:
+        await _send_settings_screen(update, context)
+    else:
+        await _drop_screen_message(context, chat_id, "settings")
+        await _ensure_menu(update, context)
+
+
+async def on_settings_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Inline taps of the settings screens (budget + back rows)."""
+    query = update.callback_query
+    data = query.data or ""
+    await query.answer()
+    if data == "q:💰 بودجه":
+        await _send_budget_screen(update, context)
+    else:
+        await _settings_go_back(update, context)
+
+
+def build_settings_handlers() -> list:
+    """Handlers for the settings screens (inline taps + the typed value)."""
+    return [
+        CallbackQueryHandler(on_settings_callback, pattern=_SETTINGS_CB_RE),
+        CallbackQueryHandler(on_flow_cancel, pattern=_Q_CANCEL_CB_RE),
+        CallbackQueryHandler(on_back_flow, pattern=r"^nav:back:flow$"),
+        MessageHandler(filters.Regex(_BUDGET_VALUE_RE), settings_budget_value),
+    ]
 
 
 def _budget_armed(context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -551,9 +816,8 @@ async def settings_budget_value(
             return  # "حذف" outside the budget prompt means nothing
         context.user_data.pop("_budget_prompt", None)
         db.set_budget(None)
-        await update.message.reply_text(
-            "💰 بودجه پاک شد.", reply_markup=_SETTINGS_KEYBOARD
-        )
+        await _drop_screen_message(context, update.effective_chat.id, "budget")
+        await _send_settings_screen(update, context)
         return
     if m.group("explicit"):
         number = _parse_positive(m.group("explicit"))
@@ -571,18 +835,8 @@ async def settings_budget_value(
     context.user_data.pop("_budget_prompt", None)
     db.set_budget(number)
     logger.info("Budget set to %.2f USD", number)
-    await update.message.reply_text(
-        f"✅ بودجهٔ حساب: {_fmt_num(number)} $ — ثبت شد.",
-        reply_markup=_SETTINGS_KEYBOARD,
-    )
-
-
-def build_settings_handlers() -> list[MessageHandler]:
-    """Handlers for the settings menu (⚙️ panel, 💰 budget, typed value)."""
-    return [
-        MessageHandler(filters.Regex(_BUDGET_RE), settings_budget),
-        MessageHandler(filters.Regex(_BUDGET_VALUE_RE), settings_budget_value),
-    ]
+    await _drop_screen_message(context, update.effective_chat.id, "budget")
+    await _send_settings_screen(update, context)
 
 
 # --------------------------------------------------------------------------
@@ -751,54 +1005,54 @@ def _purge_screenshots(row) -> None:
 # Prompt helpers (each prompt carries its own reply keyboard)
 # --------------------------------------------------------------------------
 
-async def _prompt_direction(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_direction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "جهت معامله؟", reply_markup=_DIR_KEYBOARD
     )
     return DIRECTION
 
 
-async def _prompt_leverage(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_leverage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "Leverage — دکمه را بزنید یا عدد بفرستید:",
-        reply_markup=_LEV_KEYBOARD,
+        reply_markup=_ik(_LEV_BUTTONS + [_CANCEL_IK_ROW]),
     )
     return LEVERAGE
 
 
-async def _prompt_timeframe(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "تایم‌فریم (Timeframe):",
-        reply_markup=_TF_KEYBOARD,
+        reply_markup=_ik(_TF_BUTTONS + [_CANCEL_IK_ROW]),
     )
     return TIMEFRAME
 
 
-async def _prompt_entry(update: Update) -> int:
-    await update.effective_chat.send_message(
-        "Entry price:", reply_markup=_KEYBOARD_GONE
+async def _prompt_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
+        "Entry price:"
     )
     return ENTRY
 
 
-async def _prompt_take_profit(update: Update) -> int:
-    await update.effective_chat.send_message(
-        "🎯 Take Profit (TP):", reply_markup=_KEYBOARD_GONE
+async def _prompt_take_profit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
+        "🎯 Take Profit (TP):"
     )
     return TAKE_PROFIT
 
 
-async def _prompt_stop_loss(update: Update) -> int:
-    await update.effective_chat.send_message(
-        "🛑 Stop Loss (SL):", reply_markup=_KEYBOARD_GONE
+async def _prompt_stop_loss(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
+        "🛑 Stop Loss (SL):"
     )
     return STOP_LOSS
 
 
-async def _prompt_result(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "نتیجه معامله؟",
-        reply_markup=_RESULT_KEYBOARD,
+        reply_markup=_ik([["✅ Win", "❌ Loss", "➖ BE"], _CANCEL_IK_ROW]),
     )
     return RESULT
 
@@ -810,42 +1064,41 @@ async def _prompt_margin(
         detail = "USD (حساب فارکس)"
     else:
         detail = "USDT"
-    await update.effective_chat.send_message(
+    await _q_send(update, context,
         f"💰 Margin ({detail}):",
-        reply_markup=_KEYBOARD_GONE,
     )
     return MARGIN
 
 
-async def _prompt_risk(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_risk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "⚠️ Risk — چند درصد از حساب؟ (مثلاً 1 یا 1%)",
-        reply_markup=_RISK_KEYBOARD,
+        reply_markup=_ik([["0.5%", "1%", "2%"], ["3%", "5%", "10%"], ["⏭ بدون درصد"], _CANCEL_IK_ROW]),
     )
     return RISK
 
 
-async def _prompt_trade_date(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_trade_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "تاریخ بستن معامله:\n"
         "YYYY-MM-DD  (e.g. 2026-02-09)",
-        reply_markup=_DATE_KEYBOARD,
+        reply_markup=_ik([["📅 امروز"], _CANCEL_IK_ROW]),
     )
     return TRADE_DATE
 
 
-async def _prompt_notes(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "📝 دلیل ورود (دقیقاً چرا وارد شدی؟):",
-        reply_markup=_NOTES_KEYBOARD,
+        reply_markup=_ik([["⏭ بدون دلیل"], _CANCEL_IK_ROW]),
     )
     return NOTES
 
 
-async def _prompt_screenshot(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "📸 اسکرین‌شات چارت — قبل از ورود (اختیاری):",
-        reply_markup=_SHOT_KEYBOARD,
+        reply_markup=_ik([["⏭ بدون اسکرین‌شات"], _CANCEL_IK_ROW]),
     )
     return SCREENSHOT
 
@@ -853,9 +1106,9 @@ async def _prompt_screenshot(update: Update) -> int:
 async def _prompt_screenshot_after(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    await update.effective_chat.send_message(
+    await _q_send(update, context,
         "📸 اسکرین‌شات چارت — بعد از معامله (اختیاری):",
-        reply_markup=_SHOT2_KEYBOARD,
+        reply_markup=_ik([["⏭ بدون اسکرین‌شات"], _CANCEL_IK_ROW]),
     )
     return SCREENSHOT_AFTER
 
@@ -925,10 +1178,8 @@ async def _prompt_confirm(
 ) -> int:
     summary = _summary(context.user_data)
     try:
-        await update.effective_chat.send_message(
-            summary,
-            reply_markup=_CONFIRM_KEYBOARD,
-            parse_mode=ParseMode.HTML,
+        await _q_send(
+            update, context, summary, reply_markup=_CONFIRM_KEYBOARD
         )
     except Exception:
         # Never leave the trader without a confirmation — fall back to the
@@ -945,7 +1196,8 @@ async def _save_and_reply(
 ) -> int:
     """Persist the confirmed draft and reply where the user interacted."""
     data = dict(context.user_data)
-    context.user_data.clear()
+    _reset_flow(context)
+    await _drop_screen_message(context, update.effective_chat.id, "flow")
     pnl = _pnl_from_hit(data)
     roi = _roi_from_hit(data, pnl)
     trade_id = db.add_trade(
@@ -997,18 +1249,14 @@ async def _save_and_reply(
         )
     )
     try:
-        await update.message.reply_text(
-            text, reply_markup=_MENU_KEYBOARD, parse_mode=ParseMode.HTML
-        )
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
     except Exception:
         # The trade IS saved — never skip the confirmation. Retry as plain
         # text (HTML tags stripped) and log the real cause for debugging.
         logger.error(
             "HTML save confirmation failed:\n%s", traceback.format_exc()
         )
-        await update.message.reply_text(
-            re.sub(r"</?[bi]>", "", text), reply_markup=_MENU_KEYBOARD
-        )
+        await update.message.reply_text(re.sub(r"</?[bi]>", "", text))
     return ConversationHandler.END
 
 
@@ -1017,10 +1265,8 @@ async def _discard(
 ) -> int:
     """Drop the current draft and reply where the user interacted."""
     _drop_screenshot(context)
-    context.user_data.clear()
-    await update.message.reply_text(
-        "❌ ثبت نشد — چیزی ذخیره نشد.", reply_markup=_MENU_KEYBOARD
-    )
+    _reset_flow(context)
+    await update.message.reply_text("❌ ثبت نشد — چیزی ذخیره نشد.")
     return ConversationHandler.END
 
 
@@ -1033,11 +1279,12 @@ async def trade_start(
 ) -> int:
     """Start the guided entry with the market question (crypto vs forex)."""
     _drop_screenshot(context)
-    context.user_data.clear()
-    await update.message.reply_text(
-        "ثبت معاملهٔ بسته‌شده — در کدام بازار معامله کردی؟\n"
-        "(برای انصراف /cancel را بفرستید)",
-        reply_markup=_MARKET_KEYBOARD,
+    _reset_flow(context)
+    await _q_send(
+        update,
+        context,
+        "ثبت معاملهٔ بسته‌شده — در کدام بازار معامله کردی؟",
+        _ik([["🪙 کریپتو", "💵 فارکس"], _CANCEL_IK_ROW]),
     )
     return MARKET
 
@@ -1051,15 +1298,17 @@ async def ask_market(
     elif raw in _MARKET_FOREX_TOKENS:
         context.user_data["market"] = "forex"
     else:
-        await update.message.reply_text(
+        await _q_send(
+            update,
+            context,
             "یکی از دو دکمه را بزنید: 🪙 کریپتو یا 💵 فارکس",
             reply_markup=_MARKET_KEYBOARD,
         )
         return MARKET
-    return await _prompt_symbol(update)
+    return await _prompt_symbol(update, context)
 
 
-async def _prompt_symbol(update: Update) -> int:
+async def _prompt_symbol(update: Update, context) -> int:
     symbol_kb = _symbol_keyboard()
     if symbol_kb is not None:
         text = (
@@ -1072,9 +1321,7 @@ async def _prompt_symbol(update: Update) -> int:
             "Symbol:\n"
             "e.g. EURUSD · BTCUSD · XAUUSD"
         )
-    await update.message.reply_text(
-        text, reply_markup=symbol_kb or _KEYBOARD_GONE
-    )
+    await _q_send(update, context, text, reply_markup=symbol_kb)
     return SYMBOL
 
 
@@ -1086,11 +1333,11 @@ async def ask_symbol(
         await update.message.reply_text(
             "این شبیه نماد نیست — یکی از دکمه‌های زیر را بزنید یا دوباره "
             "تایپ کنید (مثلاً EURUSD):",
-            reply_markup=_symbol_keyboard() or _KEYBOARD_GONE,
+            reply_markup=_symbol_keyboard(),
         )
         return SYMBOL
     context.user_data["symbol"] = symbol
-    return await _prompt_direction(update)
+    return await _prompt_direction(update, context)
 
 
 async def ask_direction(
@@ -1108,7 +1355,7 @@ async def ask_direction(
         )
         return DIRECTION
     context.user_data["direction"] = direction
-    return await _prompt_leverage(update)
+    return await _prompt_leverage(update, context)
 
 
 async def ask_leverage(
@@ -1117,7 +1364,7 @@ async def ask_leverage(
     raw = (update.message.text or "").strip()
     if raw.lower() in _SKIP_LEV_TOKENS:
         context.user_data.pop("leverage", None)
-        return await _prompt_timeframe(update)
+        return await _prompt_timeframe(update, context)
     text = raw.lower().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
     text = text.replace("×", "x").replace(" ", "")
     if text.startswith("x"):
@@ -1131,7 +1378,7 @@ async def ask_leverage(
         )
         return LEVERAGE
     context.user_data["leverage"] = number
-    return await _prompt_timeframe(update)
+    return await _prompt_timeframe(update, context)
 
 
 async def ask_timeframe(
@@ -1145,7 +1392,7 @@ async def ask_timeframe(
         )
         return TIMEFRAME
     context.user_data["timeframe"] = timeframe
-    return await _prompt_entry(update)
+    return await _prompt_entry(update, context)
 
 
 async def ask_entry(
@@ -1158,7 +1405,7 @@ async def ask_entry(
         )
         return ENTRY
     context.user_data["entry_price"] = number
-    return await _prompt_take_profit(update)
+    return await _prompt_take_profit(update, context)
 
 
 async def ask_take_profit(
@@ -1171,7 +1418,7 @@ async def ask_take_profit(
         )
         return TAKE_PROFIT
     context.user_data["take_profit"] = number
-    return await _prompt_stop_loss(update)
+    return await _prompt_stop_loss(update, context)
 
 
 async def ask_stop_loss(
@@ -1184,7 +1431,7 @@ async def ask_stop_loss(
         )
         return STOP_LOSS
     context.user_data["stop_loss"] = number
-    return await _prompt_result(update)
+    return await _prompt_result(update, context)
 
 
 async def ask_result(
@@ -1221,7 +1468,7 @@ async def ask_margin(
         )
         return MARGIN
     context.user_data["size"] = number  # 'size' column stores the margin
-    return await _prompt_risk(update)
+    return await _prompt_risk(update, context)
 
 
 async def ask_risk(
@@ -1230,7 +1477,7 @@ async def ask_risk(
     raw = (update.message.text or "").strip()
     if raw.lower() in _SKIP_RISK_TOKENS:
         context.user_data.pop("risk_percent", None)
-        return await _prompt_trade_date(update)
+        return await _prompt_trade_date(update, context)
     number = _parse_percent(raw)
     if number is None:
         await update.message.reply_text(
@@ -1240,7 +1487,7 @@ async def ask_risk(
     context.user_data["risk_percent"] = number
     # P&L is auto-calculated from margin, leverage and the exit price —
     # the trader is never asked for it.
-    return await _prompt_trade_date(update)
+    return await _prompt_trade_date(update, context)
 
 
 async def ask_trade_date(
@@ -1249,7 +1496,7 @@ async def ask_trade_date(
     raw = (update.message.text or "").strip()
     if raw in _SKIP_TOKENS or raw.lower() in _TODAY_TOKENS:
         context.user_data["trade_date"] = date.today().isoformat()
-        return await _prompt_trade_hour(update)
+        return await _prompt_trade_hour(update, context)
     parsed = None
     with_time = False
     for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
@@ -1268,16 +1515,16 @@ async def ask_trade_date(
         return TRADE_DATE
     if with_time:
         context.user_data["trade_date"] = parsed.strftime("%Y-%m-%d %H:%M")
-        return await _prompt_notes(update)
+        return await _prompt_notes(update, context)
     context.user_data["trade_date"] = parsed.date().isoformat()
-    return await _prompt_trade_hour(update)
+    return await _prompt_trade_hour(update, context)
 
 
-async def _prompt_trade_hour(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_trade_hour(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "ساعت بسته‌شدن (اختیاری):\n"
         "HH:MM  (e.g. 14:30) — یا «🕐 الان» برای همین حالا",
-        reply_markup=_HOUR_KEYBOARD,
+        reply_markup=_ik([["00", "03", "06", "09"], ["12", "15", "18", "21"], ["🕐 الان", "⏭ رد کردن"], _CANCEL_IK_ROW]),
     )
     return TRADE_HOUR
 
@@ -1290,9 +1537,9 @@ async def ask_trade_hour(
         context.user_data["trade_date"] += (
             f" {datetime.now().strftime('%H:%M')}"
         )
-        return await _prompt_notes(update)
+        return await _prompt_notes(update, context)
     if raw.lower() in _SKIP_HOUR_TOKENS:
-        return await _prompt_notes(update)
+        return await _prompt_notes(update, context)
     match = _HOUR_RE.match(raw)
     if not match or int(match.group(1)) > 23 or int(match.group(2) or 0) > 59:
         await update.message.reply_text(
@@ -1301,7 +1548,7 @@ async def ask_trade_hour(
         return TRADE_HOUR
     hour, minute = int(match.group(1)), int(match.group(2) or 0)
     context.user_data["trade_date"] += f" {hour:02d}:{minute:02d}"
-    return await _prompt_notes(update)
+    return await _prompt_notes(update, context)
 
 
 async def ask_notes(
@@ -1309,11 +1556,13 @@ async def ask_notes(
 ) -> int:
     raw = (update.message.text or "").strip()
     context.user_data["notes"] = "" if raw.lower() in _SKIP_NOTES_TOKENS else raw
-    return await _prompt_mood(update)
+    return await _prompt_mood(update, context)
 
 
-async def _prompt_mood(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_mood(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(
+        update,
+        context,
         "Mood — حال‌وهوای حین معامله (اختیاری):",
         reply_markup=_MOOD_KEYBOARD,
     )
@@ -1335,7 +1584,7 @@ async def ask_mood(
             "بنویسید، یا رد کنید:"
         )
         return MOOD
-    return await _prompt_screenshot(update)
+    return await _prompt_screenshot(update, context)
 
 
 async def _store_screenshot(
@@ -1421,19 +1670,46 @@ async def save_trade(
     return CONFIRM
 
 
+async def on_flow_cancel(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """✖️ لغو on any flow question — end the conversation, wipe the draft."""
+    query = update.callback_query
+    await query.answer()
+    had_draft = bool(context.user_data)
+    _drop_screenshot(context)
+    _reset_flow(context)
+    chat_id = update.effective_chat.id
+    if query.message is not None:
+        try:
+            await query.message.delete()
+        except Exception:
+            logger.info("Flow question could not be deleted on cancel.")
+    await context.bot.send_message(
+        chat_id,
+        "ثبت لغو شد." if had_draft else "چیزی برای لغو نبود.",
+    )
+    return ConversationHandler.END
+
+
+async def on_back_flow(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """🔙 on a flow question (✖️ لغو is enough for now — kept for parity)."""
+    await on_flow_cancel(update, context)
+
+
 async def cancel(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     had_draft = bool(context.user_data)
     _drop_screenshot(context)
-    context.user_data.clear()
+    _reset_flow(context)
     text = "ثبت لغو شد." if had_draft else "چیزی برای لغو نبود."
     if update.message is not None:
-        await update.message.reply_text(text, reply_markup=_MENU_KEYBOARD)
+        await update.message.reply_text(text)
     else:
-        await update.effective_chat.send_message(
-            text, reply_markup=_MENU_KEYBOARD
-        )
+        await update.effective_chat.send_message(text)
     return ConversationHandler.END
 
 
@@ -1445,40 +1721,95 @@ def build_conversation() -> ConversationHandler:
             # The 📈 New trade menu button must start a REAL conversation
             # (registering the SYMBOL state), otherwise the symbol keyboard
             # taps would be dropped — a plain message would never do that.
-            MessageHandler(filters.Regex(_NEW_TRADE_RE), trade_start),
+            CallbackQueryHandler(_tap_step(trade_start), pattern="^menu:trade$"),
         ],
         states={
-            MARKET: [MessageHandler(_ANSWER, ask_market)],
-            SYMBOL: [MessageHandler(_ANSWER, ask_symbol)],
-            DIRECTION: [MessageHandler(_ANSWER, ask_direction)],
-            LEVERAGE: [MessageHandler(_ANSWER, ask_leverage)],
-            TIMEFRAME: [MessageHandler(_ANSWER, ask_timeframe)],
-            ENTRY: [MessageHandler(_ANSWER, ask_entry)],
-            TAKE_PROFIT: [MessageHandler(_ANSWER, ask_take_profit)],
-            STOP_LOSS: [MessageHandler(_ANSWER, ask_stop_loss)],
-            RESULT: [MessageHandler(_ANSWER, ask_result)],
-            MARGIN: [MessageHandler(_ANSWER, ask_margin)],
-            RISK: [MessageHandler(_ANSWER, ask_risk)],
-            TRADE_DATE: [MessageHandler(_ANSWER, ask_trade_date)],
-            TRADE_HOUR: [MessageHandler(_ANSWER, ask_trade_hour)],
-            NOTES: [MessageHandler(_ANSWER, ask_notes)],
-            MOOD: [MessageHandler(_ANSWER, ask_mood)],
+            MARKET: [
+                CallbackQueryHandler(_tap_step(ask_market), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_market)),
+            ],
+            SYMBOL: [
+                CallbackQueryHandler(_tap_step(ask_symbol), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_symbol)),
+            ],
+            DIRECTION: [
+                CallbackQueryHandler(_tap_step(ask_direction), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_direction)),
+            ],
+            LEVERAGE: [
+                CallbackQueryHandler(_tap_step(ask_leverage), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_leverage)),
+            ],
+            TIMEFRAME: [
+                CallbackQueryHandler(_tap_step(ask_timeframe), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_timeframe)),
+            ],
+            ENTRY: [
+                CallbackQueryHandler(_tap_step(ask_entry), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_entry)),
+            ],
+            TAKE_PROFIT: [
+                CallbackQueryHandler(_tap_step(ask_take_profit), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_take_profit)),
+            ],
+            STOP_LOSS: [
+                CallbackQueryHandler(_tap_step(ask_stop_loss), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_stop_loss)),
+            ],
+            RESULT: [
+                CallbackQueryHandler(_tap_step(ask_result), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_result)),
+            ],
+            MARGIN: [
+                CallbackQueryHandler(_tap_step(ask_margin), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_margin)),
+            ],
+            RISK: [
+                CallbackQueryHandler(_tap_step(ask_risk), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_risk)),
+            ],
+            TRADE_DATE: [
+                CallbackQueryHandler(_tap_step(ask_trade_date), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_trade_date)),
+            ],
+            TRADE_HOUR: [
+                CallbackQueryHandler(_tap_step(ask_trade_hour), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_trade_hour)),
+            ],
+            NOTES: [
+                CallbackQueryHandler(_tap_step(ask_notes), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_notes)),
+            ],
+            MOOD: [
+                CallbackQueryHandler(_tap_step(ask_mood), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_mood)),
+            ],
             SCREENSHOT: [
+                CallbackQueryHandler(
+                    _tap_step(ask_screenshot_text), pattern=_Q_CB_RE
+                ),
                 MessageHandler(
-                    filters.PHOTO | filters.Document.IMAGE, ask_screenshot
+                    filters.PHOTO | filters.Document.IMAGE, _msg_step(ask_screenshot)
                 ),
                 MessageHandler(_ANSWER, ask_screenshot_text),
             ],
             SCREENSHOT_AFTER: [
+                CallbackQueryHandler(
+                    _tap_step(ask_screenshot_after_text), pattern=_Q_CB_RE
+                ),
                 MessageHandler(
-                    filters.PHOTO | filters.Document.IMAGE, ask_screenshot_after
+                    filters.PHOTO | filters.Document.IMAGE, _msg_step(ask_screenshot_after)
                 ),
                 MessageHandler(_ANSWER, ask_screenshot_after_text),
             ],
-            CONFIRM: [MessageHandler(_ANSWER, save_trade)],
+            CONFIRM: [
+                CallbackQueryHandler(_tap_step(save_trade), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(save_trade)),
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
+            CallbackQueryHandler(on_flow_cancel, pattern=_Q_CANCEL_CB_RE),
             MessageHandler(filters.Regex(_CANCEL_RE), cancel),
         ],
         allow_reentry=True,
@@ -1506,7 +1837,7 @@ _STATS_PERIOD_ORDER = ["1w", "1m", "3m", "6m", "1y", "all"]
 _STATS_SYMBOLS = "🔤 Symbols"
 _STATS_RESET = "♻️ Reset"
 _STATS_EXPORT = "📤 Export"
-_STATS_CLOSE = "✖️ Close"
+_STATS_CLOSE = "🔙 بازگشت"
 _STATS_ALL_SYMBOLS = "همه نمادها"
 
 # Callback-data namespace (never collides with plain text).
@@ -1823,7 +2154,14 @@ async def on_stats_callback(
     elif action == _CB_EXPORT:
         await _send_export(context, chat_id)
     elif action == _CB_CLOSE:
+        # 🔙 بازگشت — close the stats panel and show the main menu again.
         await _close_picker(query, context)
+        context.user_data.pop("stats_msg_id", None)
+        try:
+            await query.message.delete()
+        except Exception:
+            logger.info("Stats panel already gone.")
+        await _ensure_menu(update, context)
     # _CB_NOOP: nothing to do; the spinner is already cleared.
 
 
@@ -1879,7 +2217,7 @@ async def recent(
     if not total:
         await update.message.reply_text(
             "هنوز معامله‌ای ثبت نشده — با /trade اولین معامله را ثبت کنید.",
-            reply_markup=_MENU_KEYBOARD,
+            
         )
         return
     pages = max(1, math.ceil(total / _RECENT_PER_PAGE))
@@ -2038,9 +2376,10 @@ async def on_recent_callback(
         _recent_range = "all"
         _recent_page = 1
         try:
-            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.delete()
         except Exception:
-            logger.info("Recent panel already cleared.")
+            logger.info("Recent panel already gone.")
+        await _ensure_menu(update, context)
     elif match.group(0) == _RCB_CLOSE:
         try:
             await query.edit_message_reply_markup(reply_markup=None)
@@ -2360,7 +2699,7 @@ async def on_open_callback(
         if row is None:
             await query.answer("این معامله دیگر باز نیست.")
             return
-        context.user_data.clear()
+        _reset_flow(context)
         context.user_data["open_id"] = open_id
         context.user_data["open_symbol"] = row["symbol"]
         # Margin snapshot (budget feature) — drives the P&L preview/summary.
@@ -2379,9 +2718,10 @@ async def on_open_callback(
     if match.group(0) == _OCB_HOME:
         context.user_data.pop("open_panel_msg", None)
         try:
-            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.delete()
         except Exception:
-            logger.info("Open-trades panel already cleared.")
+            logger.info("Open-trades panel already gone.")
+        await _ensure_menu(update, context)
     elif match.group(0) == _OCB_CLOSE_MSG:
         try:
             await query.edit_message_reply_markup(reply_markup=None)
@@ -2401,16 +2741,16 @@ async def open_trade_start(
 ) -> int:
     """Start the open-trades questionnaire with the market question."""
     _drop_screenshot(context)
-    context.user_data.clear()
+    _reset_flow(context)
     text = (
         "معامله باز جدید — در کدام بازار معامله کردی؟\n"
         "(برای انصراف /cancel را بفرستید)"
     )
     if update.message is not None:
-        await update.message.reply_text(text, reply_markup=_MARKET_KEYBOARD)
+        await _q_send(update, context,text, reply_markup=_MARKET_KEYBOARD)
     else:
         # Entry via the ➕ button: there is no message to reply to.
-        await update.effective_chat.send_message(
+        await _q_send(update, context,
             text, reply_markup=_MARKET_KEYBOARD
         )
     return OPEN_MARKET
@@ -2425,7 +2765,9 @@ async def ask_open_market(
     elif raw in _MARKET_FOREX_TOKENS:
         context.user_data["market"] = "forex"
     else:
-        await update.message.reply_text(
+        await _q_send(
+            update,
+            context,
             "یکی از دو دکمه را بزنید: 🪙 کریپتو یا 💵 فارکس",
             reply_markup=_MARKET_KEYBOARD,
         )
@@ -2442,9 +2784,7 @@ async def ask_open_market(
             "Symbol:\n"
             "e.g. EURUSD · BTCUSD · XAUUSD"
         )
-    await update.message.reply_text(
-        text, reply_markup=symbol_kb or _KEYBOARD_GONE
-    )
+    await _q_send(update, context, text, reply_markup=symbol_kb)
     return OPEN_SYMBOL
 
 
@@ -2455,11 +2795,11 @@ async def ask_open_symbol(
     if not symbol or len(symbol) > 24 or any(ch.isspace() for ch in symbol):
         await update.message.reply_text(
             "این شبیه نماد نیست — دوباره تایپ کنید (مثلاً EURUSD):",
-            reply_markup=_symbol_keyboard() or _KEYBOARD_GONE,
+            reply_markup=_symbol_keyboard(),
         )
         return OPEN_SYMBOL
     context.user_data["symbol"] = symbol
-    await update.effective_chat.send_message(
+    await _q_send(update, context,
         "جهت معامله؟", reply_markup=_DIR_KEYBOARD
     )
     return OPEN_DIRECTION
@@ -2479,13 +2819,13 @@ async def ask_open_direction(
             reply_markup=_DIR_KEYBOARD,
         )
         return OPEN_DIRECTION
-    return await _prompt_open_leverage(update)
+    return await _prompt_open_leverage(update, context)
 
 
-async def _prompt_open_leverage(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_open_leverage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "⚡ اهرم (Leverage) — چند برابر؟",
-        reply_markup=_LEV_KEYBOARD,
+        reply_markup=_lev_keyboard(),
     )
     return OPEN_LEVERAGE
 
@@ -2497,7 +2837,7 @@ async def ask_open_leverage(
     raw = (update.message.text or "").strip()
     if raw.lower() in _SKIP_LEV_TOKENS:
         context.user_data.pop("leverage", None)  # skipped → defaults to 1x
-        return await _prompt_open_timeframe(update)
+        return await _prompt_open_timeframe(update, context)
     text = raw.lower().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
     text = text.replace("×", "x").replace(" ", "")
     if text.startswith("x"):
@@ -2506,17 +2846,17 @@ async def ask_open_leverage(
         text = text[:-1]
     number = _parse_positive(text)
     if number is None or number > 1000:
-        await update.message.reply_text(
+        await _q_send(update, context,
             "Leverage نامعتبر — عدد بفرستید (مثلاً 10 یا 10x) یا «⏭ بدون اهرم»:",
-            reply_markup=_LEV_KEYBOARD,
+            reply_markup=_lev_keyboard(),
         )
         return OPEN_LEVERAGE
     context.user_data["leverage"] = number
-    return await _prompt_open_timeframe(update)
+    return await _prompt_open_timeframe(update, context)
 
 
-async def _prompt_open_timeframe(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_open_timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "تایم‌فریم (Timeframe):", reply_markup=_TF_KEYBOARD
     )
     return OPEN_TIMEFRAME
@@ -2533,13 +2873,13 @@ async def ask_open_timeframe(
         )
         return OPEN_TIMEFRAME
     context.user_data["timeframe"] = timeframe
-    return await _prompt_open_reason(update)
+    return await _prompt_open_reason(update, context)
 
 
-async def _prompt_open_reason(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_open_reason(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "📝 دلیل ورود — چرا وارد این معامله شدی؟",
-        reply_markup=_NOTES_KEYBOARD,
+        reply_markup=_ik([["⏭ بدون دلیل"], _CANCEL_IK_ROW]),
     )
     return OPEN_REASON
 
@@ -2551,7 +2891,7 @@ async def ask_open_reason(
     context.user_data["reason"] = (
         "" if raw.lower() in _SKIP_NOTES_TOKENS else raw
     )
-    await update.effective_chat.send_message(
+    await _q_send(update, context,
         "📸 اسکرین‌شات چارت — لحظه ورود (اختیاری):",
         reply_markup=_SHOT_KEYBOARD,
     )
@@ -2566,7 +2906,7 @@ async def ask_open_screenshot(
             "تصویر خوانده نشد — دوباره امتحان کنید یا دکمه ⏭ بدون اسکرین‌شات را بزنید."
         )
         return OPEN_SCREENSHOT
-    return await _prompt_open_date(update)
+    return await _prompt_open_date(update, context)
 
 
 async def ask_open_screenshot_text(
@@ -2578,11 +2918,11 @@ async def ask_open_screenshot_text(
             "لطفاً یک تصویر بفرستید، دکمه ⏭ بدون اسکرین‌شات را بزنید، یا '-' را بنویسید."
         )
         return OPEN_SCREENSHOT
-    return await _prompt_open_date(update)
+    return await _prompt_open_date(update, context)
 
 
-async def _prompt_open_date(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_open_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "تاریخ ورود:\nYYYY-MM-DD  (e.g. 2026-02-09)",
         reply_markup=_DATE_KEYBOARD,
     )
@@ -2595,7 +2935,7 @@ async def ask_open_trade_date(
     raw = (update.message.text or "").strip()
     if raw in _SKIP_TOKENS or raw.lower() in _TODAY_TOKENS:
         context.user_data["trade_date"] = date.today().isoformat()
-        return await _prompt_open_hour(update)
+        return await _prompt_open_hour(update, context)
     for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
             parsed = datetime.strptime(raw, fmt)
@@ -2604,9 +2944,9 @@ async def ask_open_trade_date(
         if fmt.endswith("%H:%M"):
             context.user_data["trade_date"] = parsed.strftime("%Y-%m-%d")
             context.user_data["entry_time"] = parsed.strftime("%H:%M")
-            return await _prompt_open_risk(update)
+            return await _prompt_open_risk(update, context)
         context.user_data["trade_date"] = parsed.date().isoformat()
-        return await _prompt_open_hour(update)
+        return await _prompt_open_hour(update, context)
     await update.message.reply_text(
         "تاریخ نامعتبر.\n"
         "YYYY-MM-DD یا YYYY-MM-DD HH:MM  (e.g. 2026-02-09 14:30)\n"
@@ -2615,10 +2955,10 @@ async def ask_open_trade_date(
     return OPEN_TRADE_DATE
 
 
-async def _prompt_open_hour(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_open_hour(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "ساعت ورود:\nHH:MM  (e.g. 14:30) — یا «🕐 الان» برای همین حالا",
-        reply_markup=_HOUR_KEYBOARD,
+        reply_markup=_ik([["00", "03", "06", "09"], ["12", "15", "18", "21"], ["🕐 الان", "⏭ رد کردن"], _CANCEL_IK_ROW]),
     )
     return OPEN_TRADE_HOUR
 
@@ -2629,10 +2969,10 @@ async def ask_open_trade_hour(
     raw = (update.message.text or "").strip()
     if raw.lower() in _NOW_TOKENS:
         context.user_data["entry_time"] = datetime.now().strftime("%H:%M")
-        return await _prompt_open_risk(update)
+        return await _prompt_open_risk(update, context)
     if raw.lower() in _SKIP_HOUR_TOKENS:
         context.user_data.setdefault("entry_time", "")
-        return await _prompt_open_risk(update)
+        return await _prompt_open_risk(update, context)
     match = _HOUR_RE.match(raw)
     if not match or int(match.group(1)) > 23 or int(match.group(2) or 0) > 59:
         await update.message.reply_text(
@@ -2641,13 +2981,13 @@ async def ask_open_trade_hour(
         return OPEN_TRADE_HOUR
     hour, minute = int(match.group(1)), int(match.group(2) or 0)
     context.user_data["entry_time"] = f"{hour:02d}:{minute:02d}"
-    return await _prompt_open_risk(update)
+    return await _prompt_open_risk(update, context)
 
 
-async def _prompt_open_risk(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_open_risk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "⚠️ Risk — چند درصد از حساب؟ (مثلاً 1 یا 1%)",
-        reply_markup=_RISK_KEYBOARD,
+        reply_markup=_ik([["0.5%", "1%", "2%"], ["3%", "5%", "10%"], ["⏭ بدون درصد"], _CANCEL_IK_ROW]),
     )
     return OPEN_RISK
 
@@ -2658,7 +2998,7 @@ async def ask_open_risk(
     raw = (update.message.text or "").strip()
     if raw.lower() in _SKIP_RISK_TOKENS:
         context.user_data.pop("risk_percent", None)
-        return await _prompt_open_margin(update)
+        return await _prompt_open_margin(update, context)
     number = _parse_percent(raw)
     if number is None:
         await update.message.reply_text(
@@ -2666,7 +3006,7 @@ async def ask_open_risk(
         )
         return OPEN_RISK
     context.user_data["risk_percent"] = number
-    return await _prompt_open_margin(update)
+    return await _prompt_open_margin(update, context)
 
 
 # A manual margin that differs from the auto-calculated one by more than this
@@ -2690,11 +3030,11 @@ def _margins_conflict(user_margin: float, auto_margin_value: float) -> bool:
     return abs(user_margin - auto_margin_value) / auto_margin_value > _MARGIN_TOLERANCE
 
 
-async def _prompt_open_margin(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_open_margin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "💰 Margin — چند دلار به این معامله اختصاص می‌دی؟ (فقط USD، مثل 250)\n"
         "یا 🧮 را بزن تا از روی بودجه و درصد ریسک حساب شود:",
-        reply_markup=_OPEN_MARGIN_KEYBOARD,
+        reply_markup=_ik([[MARGIN_AUTO_BTN], _CANCEL_IK_ROW]),
     )
     return OPEN_MARGIN
 
@@ -2715,11 +3055,11 @@ async def ask_open_margin(
     if pending is not None and raw in (MARGIN_AUTO_FIX_BTN, "auto", "پیشنهاد"):
         context.user_data.pop("_margin_conflict_user", None)
         context.user_data["margin"] = _auto_margin(context.user_data)
-        return await _prompt_open_entry(update)
+        return await _prompt_open_entry(update, context)
     if pending is not None and raw in (MARGIN_KEEP_BTN, "mine", "خودم"):
         context.user_data.pop("_margin_conflict_user", None)
         context.user_data["margin"] = pending
-        return await _prompt_open_entry(update)
+        return await _prompt_open_entry(update, context)
 
     # --- fresh answer: 🧮 auto, a typed USD number, or an invalid one --------
     if raw == MARGIN_AUTO_BTN:
@@ -2733,7 +3073,7 @@ async def ask_open_margin(
             return OPEN_MARGIN
         context.user_data.pop("_margin_conflict_user", None)
         context.user_data["margin"] = auto
-        return await _prompt_open_entry(update)
+        return await _prompt_open_entry(update, context)
     number = _parse_positive(raw)
     if number is None:
         await update.message.reply_text(
@@ -2758,12 +3098,12 @@ async def ask_open_margin(
         return OPEN_MARGIN
     context.user_data.pop("_margin_conflict_user", None)
     context.user_data["margin"] = number
-    return await _prompt_open_entry(update)
+    return await _prompt_open_entry(update, context)
 
 
-async def _prompt_open_entry(update: Update) -> int:
-    await update.effective_chat.send_message(
-        "Entry price:", reply_markup=_KEYBOARD_GONE
+async def _prompt_open_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
+        "Entry price:"
     )
     return OPEN_ENTRY
 
@@ -2778,8 +3118,8 @@ async def ask_open_entry(
         )
         return OPEN_ENTRY
     context.user_data["entry_price"] = number
-    await update.effective_chat.send_message(
-        "🎯 Take Profit (TP):", reply_markup=_KEYBOARD_GONE
+    await _q_send(update, context,
+        "🎯 Take Profit (TP):"
     )
     return OPEN_TAKE_PROFIT
 
@@ -2794,8 +3134,8 @@ async def ask_open_take_profit(
         )
         return OPEN_TAKE_PROFIT
     context.user_data["take_profit"] = number
-    await update.effective_chat.send_message(
-        "🛑 Stop Loss (SL):", reply_markup=_KEYBOARD_GONE
+    await _q_send(update, context,
+        "🛑 Stop Loss (SL):"
     )
     return OPEN_STOP_LOSS
 
@@ -2861,10 +3201,8 @@ async def _prompt_open_confirm(
 ) -> int:
     summary = _open_summary(context.user_data)
     try:
-        await update.effective_chat.send_message(
-            summary,
-            reply_markup=_OPEN_CONFIRM_KEYBOARD,
-            parse_mode=ParseMode.HTML,
+        await _q_send(
+            update, context, summary, reply_markup=_OPEN_CONFIRM_KEYBOARD
         )
     except Exception:
         logger.error("HTML open confirm failed:\n%s", traceback.format_exc())
@@ -2881,7 +3219,10 @@ async def save_open_trade(
     answer = (update.message.text or "").strip().lower()
     if answer in ("y", "yes", "✅ ثبت", "ثبت", "بله", "✅ ذخیره", "ذخیره"):
         data = dict(context.user_data)
-        context.user_data.clear()
+        _reset_flow(context)
+        await _drop_screen_message(
+            context, update.effective_chat.id, "flow"
+        )
         open_id = db.add_open_trade(
             symbol=data["symbol"],
             direction=data["direction"],
@@ -2925,21 +3266,21 @@ async def save_open_trade(
         )
         try:
             await update.message.reply_text(
-                text, reply_markup=_MENU_KEYBOARD, parse_mode=ParseMode.HTML
+                text, parse_mode=ParseMode.HTML
             )
         except Exception:
             logger.error(
                 "HTML open confirmation failed:\n%s", traceback.format_exc()
             )
             await update.message.reply_text(
-                re.sub(r"</?[bi]>", "", text), reply_markup=_MENU_KEYBOARD
+                re.sub(r"</?[bi]>", "", text)
             )
         return ConversationHandler.END
     if answer in ("n", "no", "❌ ثبت نشود", "❌ discard", "خیر", "ثبت نشود"):
         _drop_screenshot(context)
-        context.user_data.clear()
+        _reset_flow(context)
         await update.message.reply_text(
-            "❌ ثبت نشد — چیزی ذخیره نشد.", reply_markup=_MENU_KEYBOARD
+            "❌ ثبت نشد — چیزی ذخیره نشد."
         )
         return ConversationHandler.END
     await update.message.reply_text("لطفاً یکی از دکمه‌ها را انتخاب کنید:")
@@ -2967,11 +3308,11 @@ async def _close_begin(
     if row is None:
         text = f"معامله بازی با شماره #{open_id} پیدا نشد."
         if update.message is not None:
-            await update.message.reply_text(text)
+            await _q_send(update, context,text)
         else:
-            await update.effective_chat.send_message(text)
+            await _q_send(update, context,text)
         return ConversationHandler.END
-    context.user_data.clear()
+    _reset_flow(context)
     context.user_data["open_id"] = open_id
     context.user_data["open_symbol"] = row["symbol"]
     # Margin snapshot (budget feature) — drives the P&L preview/summary.
@@ -2979,7 +3320,7 @@ async def _close_begin(
     context.user_data["open_entry_price"] = row["entry_price"]
     context.user_data["open_direction"] = row["direction"]
     context.user_data["open_leverage"] = row["leverage"]
-    await update.effective_chat.send_message(
+    await _q_send(update, context,
         f"بستن معامله #{open_id} {_ESC(row['symbol'])} — نتیجه؟",
         reply_markup=_STATUS_KEYBOARD,
     )
@@ -2997,7 +3338,7 @@ async def ask_close_status(
         )
         return CLOSE_STATUS
     context.user_data["hit"] = status
-    await update.effective_chat.send_message(
+    await _q_send(update, context,
         "تاریخ بستن معامله:\nYYYY-MM-DD  (e.g. 2026-02-09)",
         reply_markup=_DATE_KEYBOARD,
     )
@@ -3010,7 +3351,7 @@ async def ask_close_date(
     raw = (update.message.text or "").strip()
     if raw in _SKIP_TOKENS or raw.lower() in _TODAY_TOKENS:
         context.user_data["trade_date"] = date.today().isoformat()
-        return await _prompt_close_hour(update)
+        return await _prompt_close_hour(update, context)
     for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
             parsed = datetime.strptime(raw, fmt)
@@ -3021,7 +3362,7 @@ async def ask_close_date(
             context.user_data["exit_time"] = parsed.strftime("%H:%M")
             return await _prompt_close_price(update, context)
         context.user_data["trade_date"] = parsed.date().isoformat()
-        return await _prompt_close_hour(update)
+        return await _prompt_close_hour(update, context)
     await update.message.reply_text(
         "تاریخ نامعتبر.\n"
         "YYYY-MM-DD یا YYYY-MM-DD HH:MM  (e.g. 2026-02-09 14:30)\n"
@@ -3030,10 +3371,10 @@ async def ask_close_date(
     return CLOSE_DATE
 
 
-async def _prompt_close_hour(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_close_hour(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "ساعت بستن:\nHH:MM  (e.g. 14:30) — یا «🕐 الان» برای همین حالا",
-        reply_markup=_HOUR_KEYBOARD,
+        reply_markup=_ik([["00", "03", "06", "09"], ["12", "15", "18", "21"], ["🕐 الان", "⏭ رد کردن"], _CANCEL_IK_ROW]),
     )
     return CLOSE_HOUR
 
@@ -3068,27 +3409,27 @@ async def _prompt_close_price(
     row = db.get_open_trade(open_id) if open_id else None
     if hit == "win" and row is not None and row["take_profit"]:
         context.user_data["exit_price"] = row["take_profit"]
-        await update.effective_chat.send_message(
+        await _q_send(update, context,
             f"🎯 Exit price: {_fmt_num(row['take_profit'])} (TP hit)",
-            reply_markup=_KEYBOARD_GONE,
+            reply_markup=None,
         )
-        return await _prompt_close_photos(update)
+        return await _prompt_close_photos(update, context)
     if hit == "loss" and row is not None and row["stop_loss"]:
         context.user_data["exit_price"] = row["stop_loss"]
-        await update.effective_chat.send_message(
+        await _q_send(update, context,
             f"🛑 Exit price: {_fmt_num(row['stop_loss'])} (SL hit)",
-            reply_markup=_KEYBOARD_GONE,
+            reply_markup=None,
         )
-        return await _prompt_close_photos(update)
+        return await _prompt_close_photos(update, context)
     if hit == "be" and row is not None:
         context.user_data["exit_price"] = row["entry_price"]
-        await update.effective_chat.send_message(
+        await _q_send(update, context,
             f"➖ Exit price: {_fmt_num(row['entry_price'])} (breakeven)",
-            reply_markup=_KEYBOARD_GONE,
+            reply_markup=None,
         )
-        return await _prompt_close_photos(update)
-    await update.effective_chat.send_message(
-        "Exit price:", reply_markup=_KEYBOARD_GONE
+        return await _prompt_close_photos(update, context)
+    await _q_send(update, context,
+        "Exit price:"
     )
     return CLOSE_PRICE
 
@@ -3103,13 +3444,13 @@ async def ask_close_price(
         )
         return CLOSE_PRICE
     context.user_data["exit_price"] = number
-    return await _prompt_close_photos(update)
+    return await _prompt_close_photos(update, context)
 
 
-async def _prompt_close_photos(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_close_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "📸 اسکرین‌شات خروج — تا ۴ تصویر، یکی‌یکی بفرستید (اختیاری):",
-        reply_markup=_SHOT_KEYBOARD,
+        reply_markup=_ik([["⏭ بدون اسکرین‌شات"], _CANCEL_IK_ROW]),
     )
     return CLOSE_PHOTOS
 
@@ -3133,8 +3474,8 @@ async def ask_close_photos(
     context.user_data["exit_photos"] = (names + "\n" + new_name).strip()
     kept = len(context.user_data["exit_photos"].splitlines())
     if kept >= _MAX_EXIT_PHOTOS:
-        return await _prompt_close_reason(update)
-    await update.effective_chat.send_message(
+        return await _prompt_close_reason(update, context)
+    await _q_send(update, context,
         f"📥 {_fa_num(kept)} از {_fa_num(_MAX_EXIT_PHOTOS)} — "
         "تصویر بعدی یا ⏭ بدون اسکرین‌شات:",
         reply_markup=_SHOT_KEYBOARD,
@@ -3151,19 +3492,21 @@ async def ask_close_photos_text(
             "لطفاً یک تصویر بفرستید، دکمه ⏭ بدون اسکرین‌شات را بزنید، یا '-' را بنویسید."
         )
         return CLOSE_PHOTOS
-    return await _prompt_close_reason(update)
+    return await _prompt_close_reason(update, context)
 
 
-async def _prompt_close_reason(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_close_reason(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(update, context,
         "📝 دلیل خروج — چرا از معامله خارج شدی؟",
-        reply_markup=_NOTES_KEYBOARD,
+        reply_markup=_ik([["⏭ بدون دلیل"], _CANCEL_IK_ROW]),
     )
     return CLOSE_REASON
 
 
-async def _prompt_close_mood(update: Update) -> int:
-    await update.effective_chat.send_message(
+async def _prompt_close_mood(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _q_send(
+        update,
+        context,
         "Mood — حال‌وهوای حین معامله (اختیاری):",
         reply_markup=_MOOD_KEYBOARD,
     )
@@ -3177,7 +3520,7 @@ async def ask_close_reason(
     context.user_data["notes"] = (
         "" if raw.lower() in _SKIP_NOTES_TOKENS else raw
     )
-    return await _prompt_close_mood(update)
+    return await _prompt_close_mood(update, context)
 
 
 async def ask_close_mood(
@@ -3258,10 +3601,8 @@ async def _prompt_close_confirm(
 ) -> int:
     summary = _close_summary(context.user_data)
     try:
-        await update.effective_chat.send_message(
-            summary,
-            reply_markup=_OPEN_CONFIRM_KEYBOARD,
-            parse_mode=ParseMode.HTML,
+        await _q_send(
+            update, context, summary, reply_markup=_OPEN_CONFIRM_KEYBOARD
         )
     except Exception:
         logger.error("HTML close confirm failed:\n%s", traceback.format_exc())
@@ -3278,7 +3619,7 @@ async def save_close_trade(
     answer = (update.message.text or "").strip().lower()
     if answer in ("y", "yes", "✅ ثبت", "ثبت", "بله", "✅ ذخیره", "ذخیره"):
         data = dict(context.user_data)
-        context.user_data.clear()
+        _reset_flow(context)
         open_id = data.pop("open_id")
         # Real P&L/ROI when the open questionnaire recorded a margin
         # (db.close_open_trade stores the same values from the DB row).
@@ -3314,13 +3655,15 @@ async def save_close_trade(
         if new_id is None:
             await update.message.reply_text(
                 "این معامله دیگر باز نیست — شاید قبلاً بسته شده باشد.",
-                reply_markup=_MENU_KEYBOARD,
             )
             return ConversationHandler.END
         logger.info(
             "Closed open trade #%s -> trade #%s (%s)",
             open_id, new_id, data.get("hit"),
         )
+        _reset_flow(context)
+        chat_id = update.effective_chat.id
+        await _drop_screen_message(context, chat_id, "flow")
         emoji = _OPEN_EMOJI.get(data["hit"], "✏️")
         label = _OPEN_STATUS_LABELS.get(data["hit"], data["hit"])
         text = (
@@ -3344,21 +3687,19 @@ async def save_close_trade(
         )
         try:
             await update.message.reply_text(
-                text, reply_markup=_MENU_KEYBOARD, parse_mode=ParseMode.HTML
+                text, parse_mode=ParseMode.HTML
             )
         except Exception:
             logger.error(
                 "HTML close confirmation failed:\n%s", traceback.format_exc()
             )
-            await update.message.reply_text(
-                re.sub(r"</?[bi]>", "", text), reply_markup=_MENU_KEYBOARD
-            )
+            await update.message.reply_text(re.sub(r"</?[bi]>", "", text))
         return ConversationHandler.END
     if answer in ("n", "no", "❌ ثبت نشود", "❌ discard", "خیر", "ثبت نشود"):
         _drop_screenshot(context)
-        context.user_data.clear()
+        _reset_flow(context)
         await update.message.reply_text(
-            "❌ ثبت نشد — معامله هنوز باز است.", reply_markup=_MENU_KEYBOARD
+            "❌ ثبت نشد — معامله هنوز باز است."
         )
         return ConversationHandler.END
     await update.message.reply_text("لطفاً یکی از دکمه‌ها را انتخاب کنید:")
@@ -3376,34 +3717,80 @@ def build_open_conversation() -> ConversationHandler:
         entry_points=[
             CallbackQueryHandler(open_trades_add_entry, pattern=_OPEN_ADD_RE),
             # 🟢 ثبت معامله باز on the main menu — straightforward start.
-            MessageHandler(filters.Regex(_OPEN_ADD_TEXT_RE), open_trade_start),
+            CallbackQueryHandler(_tap_step(open_trade_start), pattern="^menu:open$"),
             # /open — same straightforward start (see /opens for the panel).
             CommandHandler("open", open_trade_start),
         ],
         states={
-            OPEN_MARKET: [MessageHandler(_ANSWER, ask_open_market)],
-            OPEN_SYMBOL: [MessageHandler(_ANSWER, ask_open_symbol)],
-            OPEN_DIRECTION: [MessageHandler(_ANSWER, ask_open_direction)],
-            OPEN_LEVERAGE: [MessageHandler(_ANSWER, ask_open_leverage)],
-            OPEN_TIMEFRAME: [MessageHandler(_ANSWER, ask_open_timeframe)],
-            OPEN_REASON: [MessageHandler(_ANSWER, ask_open_reason)],
+            OPEN_MARKET: [
+                CallbackQueryHandler(_tap_step(ask_open_market), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_open_market)),
+            ],
+            OPEN_SYMBOL: [
+                CallbackQueryHandler(_tap_step(ask_open_symbol), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_open_symbol)),
+            ],
+            OPEN_DIRECTION: [
+                CallbackQueryHandler(_tap_step(ask_open_direction), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_open_direction)),
+            ],
+            OPEN_LEVERAGE: [
+                CallbackQueryHandler(_tap_step(ask_open_leverage), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_open_leverage)),
+            ],
+            OPEN_TIMEFRAME: [
+                CallbackQueryHandler(_tap_step(ask_open_timeframe), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_open_timeframe)),
+            ],
+            OPEN_REASON: [
+                CallbackQueryHandler(_tap_step(ask_open_reason), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_open_reason)),
+            ],
             OPEN_SCREENSHOT: [
+                CallbackQueryHandler(
+                    _tap_step(ask_open_screenshot_text), pattern=_Q_CB_RE
+                ),
                 MessageHandler(
-                    filters.PHOTO | filters.Document.IMAGE, ask_open_screenshot
+                    filters.PHOTO | filters.Document.IMAGE, _msg_step(ask_open_screenshot)
                 ),
                 MessageHandler(_ANSWER, ask_open_screenshot_text),
             ],
-            OPEN_TRADE_DATE: [MessageHandler(_ANSWER, ask_open_trade_date)],
-            OPEN_TRADE_HOUR: [MessageHandler(_ANSWER, ask_open_trade_hour)],
-            OPEN_RISK: [MessageHandler(_ANSWER, ask_open_risk)],
-            OPEN_MARGIN: [MessageHandler(_ANSWER, ask_open_margin)],
-            OPEN_ENTRY: [MessageHandler(_ANSWER, ask_open_entry)],
-            OPEN_TAKE_PROFIT: [MessageHandler(_ANSWER, ask_open_take_profit)],
-            OPEN_STOP_LOSS: [MessageHandler(_ANSWER, ask_open_stop_loss)],
-            OPEN_CONFIRM: [MessageHandler(_ANSWER, save_open_trade)],
+            OPEN_TRADE_DATE: [
+                CallbackQueryHandler(_tap_step(ask_open_trade_date), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_open_trade_date)),
+            ],
+            OPEN_TRADE_HOUR: [
+                CallbackQueryHandler(_tap_step(ask_open_trade_hour), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_open_trade_hour)),
+            ],
+            OPEN_RISK: [
+                CallbackQueryHandler(_tap_step(ask_open_risk), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_open_risk)),
+            ],
+            OPEN_MARGIN: [
+                CallbackQueryHandler(_tap_step(ask_open_margin), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_open_margin)),
+            ],
+            OPEN_ENTRY: [
+                CallbackQueryHandler(_tap_step(ask_open_entry), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_open_entry)),
+            ],
+            OPEN_TAKE_PROFIT: [
+                CallbackQueryHandler(_tap_step(ask_open_take_profit), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_open_take_profit)),
+            ],
+            OPEN_STOP_LOSS: [
+                CallbackQueryHandler(_tap_step(ask_open_stop_loss), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_open_stop_loss)),
+            ],
+            OPEN_CONFIRM: [
+                CallbackQueryHandler(_tap_step(save_open_trade), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(save_open_trade)),
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
+            CallbackQueryHandler(on_flow_cancel, pattern=_Q_CANCEL_CB_RE),
             MessageHandler(filters.Regex(_CANCEL_RE), cancel),
         ],
         allow_reentry=True,
@@ -3423,22 +3810,47 @@ def build_close_conversation() -> ConversationHandler:
             CommandHandler("close", close_start_text),
         ],
         states={
-            CLOSE_STATUS: [MessageHandler(_ANSWER, ask_close_status)],
-            CLOSE_DATE: [MessageHandler(_ANSWER, ask_close_date)],
-            CLOSE_HOUR: [MessageHandler(_ANSWER, ask_close_hour)],
-            CLOSE_PRICE: [MessageHandler(_ANSWER, ask_close_price)],
+            CLOSE_STATUS: [
+                CallbackQueryHandler(_tap_step(ask_close_status), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_close_status)),
+            ],
+            CLOSE_DATE: [
+                CallbackQueryHandler(_tap_step(ask_close_date), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_close_date)),
+            ],
+            CLOSE_HOUR: [
+                CallbackQueryHandler(_tap_step(ask_close_hour), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_close_hour)),
+            ],
+            CLOSE_PRICE: [
+                CallbackQueryHandler(_tap_step(ask_close_price), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_close_price)),
+            ],
             CLOSE_PHOTOS: [
+                CallbackQueryHandler(
+                    _tap_step(ask_close_photos_text), pattern=_Q_CB_RE
+                ),
                 MessageHandler(
-                    filters.PHOTO | filters.Document.IMAGE, ask_close_photos
+                    filters.PHOTO | filters.Document.IMAGE, _msg_step(ask_close_photos)
                 ),
                 MessageHandler(_ANSWER, ask_close_photos_text),
             ],
-            CLOSE_REASON: [MessageHandler(_ANSWER, ask_close_reason)],
-            CLOSE_MOOD: [MessageHandler(_ANSWER, ask_close_mood)],
-            CLOSE_CONFIRM: [MessageHandler(_ANSWER, save_close_trade)],
+            CLOSE_REASON: [
+                CallbackQueryHandler(_tap_step(ask_close_reason), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_close_reason)),
+            ],
+            CLOSE_MOOD: [
+                CallbackQueryHandler(_tap_step(ask_close_mood), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_close_mood)),
+            ],
+            CLOSE_CONFIRM: [
+                CallbackQueryHandler(_tap_step(save_close_trade), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(save_close_trade)),
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
+            CallbackQueryHandler(on_flow_cancel, pattern=_Q_CANCEL_CB_RE),
             MessageHandler(filters.Regex(_CANCEL_RE), cancel),
         ],
         allow_reentry=True,
