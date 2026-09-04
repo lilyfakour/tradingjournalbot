@@ -61,6 +61,13 @@ class StubBot(Bot):
     async def answer_callback_query(self, callback_query_id=None, **kw):
         return True
 
+    async def set_my_commands(self, commands=None, **kw):
+        self._commands = list(commands or [])
+        return True
+
+    async def set_chat_menu_button(self, **kw):
+        return True
+
 
 def tap(stub, user, chat, data, oid=1):
     msg = Message(message_id=oid, date=datetime.now(), chat=chat, from_user=user)
@@ -306,6 +313,27 @@ async def main():
     assert not any("رابط جدید" in t for t in added), added
     assert any("👋" in t for t in added), added
     print("PASS  second /start re-sends the menu without the cleanup message")
+
+    # 9) bot.py's real handler registration + post_init must EXECUTE cleanly
+    # (regression: a missing import only exploded at startup — invisible to
+    # py_compile and to plain module imports).
+    import bot as bot_module
+
+    app2 = (
+        ApplicationBuilder()
+        .bot(stub)
+        .post_init(bot_module.post_init)
+        .build()
+    )
+    bot_module._register_handlers(app2)
+    registered = sum(len(g) for g in app2.handlers.values())
+    assert registered >= 10, registered
+    await bot_module.post_init(app2)
+    assert stub._commands == [], stub._commands
+    print(
+        f"PASS  bot.py: {registered} handlers registered, "
+        "legacy command menu cleared"
+    )
 
     print("ALL PROBES PASSED")
 

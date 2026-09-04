@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import Optional
 
 from telegram import (
-    Chat,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,

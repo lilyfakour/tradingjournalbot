@@ -4,7 +4,7 @@ import logging
 import os
 from pathlib import Path
 
-from telegram.ext import Application, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 import db
 import journal
@@ -70,14 +70,8 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Error while handling an update", exc_info=context.error)
 
 
-def main() -> None:
-    db.init_db()
-    app = (
-        Application.builder()
-        .token(get_token())
-        .post_init(post_init)
-        .build()
-    )
+def _register_handlers(app: Application) -> None:
+    """Register every command, conversation and callback handler."""
     app.add_handler(CommandHandler("start", journal.show_menu))
     app.add_handler(CommandHandler("settings", journal.show_settings))
     app.add_handler(journal.build_conversation())
@@ -95,6 +89,17 @@ def main() -> None:
     app.add_handler(CommandHandler("stats", journal.stats))
     app.add_handler(CommandHandler("delete", journal.delete_cmd))
     app.add_error_handler(on_error)
+
+
+def main() -> None:
+    db.init_db()
+    app = (
+        Application.builder()
+        .token(get_token())
+        .post_init(post_init)
+        .build()
+    )
+    _register_handlers(app)
     logger.info("Bot is running — press Ctrl+C to stop.")
     app.run_polling()
 
