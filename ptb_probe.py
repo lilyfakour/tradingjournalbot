@@ -151,6 +151,13 @@ async def main():
     assert closed["hit"] == "win" and closed["symbol"] == "BTCUSD", dict(closed)
     print("PASS  confirm -> saved into history, conversation ended")
 
+    # 5) the recent-detail card of the just-closed two-phase trade renders —
+    #    regression for the reported "click on a two-phase trade does nothing".
+    detail = journal._recent_detail_text(closed)
+    assert "مارجین: —" in detail and "سود و زیان: <b>—</b>" in detail, detail
+    assert "دلیل ورود" in detail and "دلیل خروج" in detail, detail
+    print("PASS  recent detail of the two-phase trade renders (NULL-safe)")
+
     print("ALL PROBES PASSED")
 
 

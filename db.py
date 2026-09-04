@@ -521,6 +521,22 @@ def clear_screenshot(trade_id: int) -> Optional[str]:
         conn.close()
 
 
+# Shared SQL: classify win/loss/BE for rows whose P&L is NULL (two-phase
+# closes) from `hit` and the price direction. Used by get_stats and the mood
+# breakdown so both agree on every trade.
+_HIT_WIN_SQL = (
+    "hit IN ('tp', 'win')"
+    " OR (hit = 'manual' AND ((direction = 'long' AND exit_price > entry_price)"
+    " OR (direction = 'short' AND exit_price < entry_price)))"
+)
+_HIT_LOSS_SQL = (
+    "hit IN ('sl', 'lose')"
+    " OR (hit = 'manual' AND ((direction = 'long' AND exit_price < entry_price)"
+    " OR (direction = 'short' AND exit_price > entry_price)))"
+)
+_HIT_BE_SQL = "hit = 'be' OR (hit = 'manual' AND exit_price = entry_price)"
+
+
 def get_stats(
     symbol: Optional[str] = None, since: Optional[str] = None
 ) -> dict[str, Any]:
@@ -531,17 +547,6 @@ def get_stats(
     """
     # Trades closed from the open-trades flow have no margin, so their P&L is
     # NULL: classify win/loss/BE from `hit` and the price direction instead.
-    _hit_win = (
-        "hit IN ('tp', 'win')"
-        " OR (hit = 'manual' AND ((direction = 'long' AND exit_price > entry_price)"
-        " OR (direction = 'short' AND exit_price < entry_price)))"
-    )
-    _hit_loss = (
-        "hit IN ('sl', 'lose')"
-        " OR (hit = 'manual' AND ((direction = 'long' AND exit_price < entry_price)"
-        " OR (direction = 'short' AND exit_price > entry_price)))"
-    )
-    _hit_be = "hit = 'be' OR (hit = 'manual' AND exit_price = entry_price)"
     conn = _connect()
     try:
         clauses, params = [], []
@@ -556,11 +561,11 @@ def get_stats(
             "SELECT COUNT(*) AS trades,"
             " SUM(pnl) AS total,"
             " SUM(CASE WHEN pnl > 0 THEN 1"
-            f" WHEN pnl IS NULL AND ({_hit_win}) THEN 1 ELSE 0 END) AS wins,"
+            f" WHEN pnl IS NULL AND ({_HIT_WIN_SQL}) THEN 1 ELSE 0 END) AS wins,"
             " SUM(CASE WHEN pnl < 0 THEN 1"
-            f" WHEN pnl IS NULL AND ({_hit_loss}) THEN 1 ELSE 0 END) AS losses,"
+            f" WHEN pnl IS NULL AND ({_HIT_LOSS_SQL}) THEN 1 ELSE 0 END) AS losses,"
             " SUM(CASE WHEN pnl = 0 THEN 1"
-            f" WHEN pnl IS NULL AND ({_hit_be}) THEN 1 ELSE 0 END) AS be,"
+            f" WHEN pnl IS NULL AND ({_HIT_BE_SQL}) THEN 1 ELSE 0 END) AS be,"
             " AVG(CASE WHEN pnl > 0 THEN pnl END) AS avg_win,"
             " AVG(CASE WHEN pnl < 0 THEN pnl END) AS avg_loss,"
             " AVG(roi) AS avg_roi,"
@@ -579,7 +584,11 @@ def get_stats(
 def get_mood_breakdown(
     symbol: Optional[str] = None, since: Optional[str] = None
 ) -> list[sqlite3.Row]:
-    """Per-mood aggregates (trades, total P&L, wins), best P&L first."""
+    """Per-mood aggregates (trades, total P&L, wins), best P&L first.
+
+    total is SUM(pnl) — NULL when every trade in the mood group comes from the
+    two-phase flow (no margin); the panel renders that as '—'.
+    """
     conn = _connect()
     try:
         clauses, params = ["mood != ''"], []
@@ -593,7 +602,8 @@ def get_mood_breakdown(
         return conn.execute(
             "SELECT mood, COUNT(*) AS trades,"
             " SUM(pnl) AS total,"
-            " SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins"
+            " SUM(CASE WHEN pnl > 0 THEN 1"
+            f" WHEN pnl IS NULL AND ({_HIT_WIN_SQL}) THEN 1 ELSE 0 END) AS wins"
             " FROM trades" + where + " GROUP BY mood ORDER BY total DESC",
             params,
         ).fetchall()

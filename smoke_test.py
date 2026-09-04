@@ -309,6 +309,7 @@ async def main() -> int:
         journal._fmt_pnl(2.0) == "+$2.00"
         and journal._fmt_pnl(-0.02) == "-$0.02"
         and journal._fmt_pnl(0) == "+$0.00"
+        and journal._fmt_pnl(None) == "—"
         and journal._fmt_roi(12.5) == "+12.50%"
         and journal._fmt_roi(None) == "-",
         "P&L / ROI formatting helpers",
@@ -1294,6 +1295,67 @@ async def main() -> int:
         "BE close stored with the entry price as exit",
     )
 
+    # --- 🕘 recent detail of a two-phase trade (the tap that used to die) --------
+    dtxt = journal._recent_detail_text(closed)  # TP close: rich two-phase row
+    check(
+        "مارجین: —" in dtxt and "سود و زیان: <b>—</b>" in dtxt,
+        "two-phase detail renders '—' for NULL margin/P&L (no crash)",
+    )
+    check(
+        "دلیل ورود" in dtxt and "broke range high" in dtxt
+        and "دلیل خروج" in dtxt and "TP tapped, momentum gone" in dtxt
+        and "🔁" in dtxt,
+        "two-phase detail shows entry reason, exit reason and the 🔁 badge",
+    )
+    check(
+        "ساعت: ورود 10:30 · خروج 15:45" in dtxt
+        and "خروج ×۲" in dtxt,
+        "two-phase detail shows entry/exit times and the exit-photo count",
+    )
+    check(
+        ("📸 عکس‌های خروج", f"rec:px:{closed['id']}")
+        in _inline_flat(journal._recent_detail_kb(closed["id"], True, True)),
+        "two-phase detail carries the 📸 exit-photos button",
+    )
+
+    # --- 📊 stats with two-phase rows (NULL P&L) — regression for the dead panel
+    mixed = db.get_stats()
+    check(
+        mixed["trades"] == 7 and mixed["total"] is not None
+        and mixed["best"] is not None,
+        "stats with NULL-P&L rows keeps sums/maxima numeric",
+    )
+    check(
+        (mixed["wins"], mixed["losses"], mixed["be"]) == (4, 2, 1),
+        "NULL-P&L trades classified by status (W/L/BE)",
+    )
+
+    # An all-NULL selection (only two-phase closes) must render '—', not crash —
+    # this is exactly what froze the 📊 panel in production.
+    zz_open = db.add_open_trade(
+        symbol="ZZTEST", direction="long", market="crypto", timeframe="1h",
+        reason="zz entry", screenshot=None, trade_date="2026-03-06",
+        entry_time="09:00", risk_percent=1, entry_price=10,
+        take_profit=11, stop_loss=9,
+    )
+    zz_id = db.close_open_trade(
+        zz_open, hit="win", exit_price=11, trade_date="2026-03-06",
+        exit_time="10:00", notes="zz exit", mood="طمع",
+        exit_photos=None, screenshot_after=None,
+    )
+    zs = db.get_stats(symbol="ZZTEST")
+    check(
+        zs["trades"] == 1 and zs["total"] is None and zs["best"] is None
+        and zs["wins"] == 1 and zs["losses"] == 0 and zs["be"] == 0,
+        "stats over ONLY two-phase rows: NULL sums + status-based W/L/BE",
+    )
+    ztext = journal._render_stats("ZZTEST", "all")
+    check(
+        "—</b>" in ztext and "None" not in ztext and "طمع" in ztext,
+        "stats panel renders '—' instead of crashing on an all-NULL selection",
+    )
+    db.delete_trade(zz_id)
+
     # --- 🟢 /open with nothing open: empty panel with ➕ (no auto-start) ---------
     empty_upd = FakeUpdate()
     await journal.open_trades(empty_upd.text("/open"), FakeContext())
@@ -1880,7 +1942,7 @@ async def main() -> int:
     )
     for data in (
         "rec:p:1", "rec:r:1w", "rec:r:1m", "rec:r:all", "rec:v:3",
-        "rec:ph:3", "rec:d:3", "rec:home", "rec:close", "rec:noop",
+        "rec:ph:3", "rec:px:3", "rec:d:3", "rec:home", "rec:close", "rec:noop",
     ):
         check(
             bool(journal._RECENT_CB_RE.match(data)),
@@ -1888,7 +1950,7 @@ async def main() -> int:
         )
     for data in (
         "hello", "recent", "rec:", "rec:p:", "recx:p:1", "rec:r:1y",
-        "rec:v:x", "recent:p:1",
+        "rec:v:x", "rec:px:x", "recent:p:1",
     ):
         check(
             not journal._RECENT_CB_RE.match(data),

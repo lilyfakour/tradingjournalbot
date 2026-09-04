@@ -508,8 +508,14 @@ def _fmt_size(value: float) -> str:
     return f"{value:,.4f}".rstrip("0").rstrip(".")
 
 
-def _fmt_pnl(value: float) -> str:
-    """Signed dollar amount, e.g. +$12.50 or -$3.00."""
+def _fmt_pnl(value: Optional[float]) -> str:
+    """Signed dollar amount, e.g. +$12.50 or -$3.00; '—' when unknown (NULL).
+
+    Two-phase (open → close) trades have no margin question, so their P&L is
+    NULL by design — stats sums/maxima then come back as NULL too.
+    """
+    if value is None:
+        return "—"
     sign = "+" if value >= 0 else "-"
     return f"{sign}${abs(value):,.2f}"
 
@@ -1798,16 +1804,28 @@ async def on_recent_callback(
             )
             return
         # SEND the detail as its own big message; the panel stays intact.
-        has_shots = bool(row["screenshot"] or row["screenshot_after"])
+        has_shots = bool(
+            row["screenshot"]
+            or row["screenshot_after"]
+            or _row_get(row, "exit_photos")
+        )
         await update.effective_chat.send_message(
             _recent_detail_text(row),
-            reply_markup=_recent_detail_kb(row["id"], has_shots),
+            reply_markup=_recent_detail_kb(
+                row["id"],
+                has_shots,
+                bool(_row_get(row, "exit_photos")),
+            ),
             parse_mode=ParseMode.HTML,
         )
         return
     if match.group("photo") is not None:
         await query.answer()
         await _send_trade_photos(update, int(match.group("photo")))
+        return
+    if match.group("xphoto") is not None:
+        await query.answer()
+        await _send_exit_photos(update, int(match.group("xphoto")))
         return
     if match.group("del") is not None:
         trade_id = int(match.group("del"))
@@ -3079,6 +3097,7 @@ _RCB_PAGE = f"{_RCB}:p:"
 _RCB_RANGE = f"{_RCB}:r:"
 _RCB_VIEW = f"{_RCB}:v:"
 _RCB_PHOTO = f"{_RCB}:ph:"
+_RCB_XPHOTO = f"{_RCB}:px:"
 _RCB_DEL = f"{_RCB}:d:"
 _RCB_HOME = f"{_RCB}:home"
 _RCB_CLOSE = f"{_RCB}:close"
@@ -3086,19 +3105,26 @@ _RCB_NOOP = f"{_RCB}:noop"
 _RECENT_CB_RE = re.compile(
     r"^" + re.escape(_RCB)
     + r":(?:p:(?P<page>\d+)|r:(?P<range>all|1w|1m)"
-    r"|v:(?P<view>\d+)|ph:(?P<photo>\d+)|d:(?P<del>\d+)|home|close|noop)$"
+    r"|v:(?P<view>\d+)|ph:(?P<photo>\d+)|px:(?P<xphoto>\d+)"
+    r"|d:(?P<del>\d+)|home|close|noop)$"
 )
 
 
+def _row_get(row, key):
+    """Column value that tolerates rows fetched before a migration step."""
+    return row[key] if key in row.keys() else None
+
+
 def _recent_button(row) -> str:
-    """Label of a trade's list button: emoji, id, symbol, P&L, 📷 mark."""
+    """Label of a trade's list button: emoji, id, symbol, P&L, marks."""
     emoji = _result_emoji(row["hit"])
     shots = " 📷" if row["screenshot"] or row["screenshot_after"] else ""
+    two_phase = " 🔁" if (_row_get(row, "source") or "") == "open" else ""
     # Open-flow closes have no margin question, so P&L can be NULL.
     pnl_txt = _fmt_pnl(row["pnl"]) if row["pnl"] is not None else "—"
     return (
         f"{emoji} #{row['id']} — {_ESC(row['symbol'])}"
-        f" · {pnl_txt}{shots}"
+        f" · {pnl_txt}{shots}{two_phase}"
     )
 
 
@@ -3112,12 +3138,16 @@ def _recent_panel_text(page: int, pages: int) -> str:
 
 
 def _recent_detail_text(row) -> str:
-    """Big, airy detail card for one trade (HTML) — sent as its own message."""
+    """Big, airy detail card for one trade (HTML) — sent as its own message.
+
+    Renders /trade entries and two-phase (open → close) trades alike; every
+    field a flow does not provide shows as “—” instead of crashing.
+    """
     roi = row["roi"]
     if roi is None and row["size"]:
         roi = row["pnl"] / row["size"] * 100.0
     emoji = _result_emoji(row["hit"])
-    side = _DIR_LABEL.get(row["direction"], row["direction"].upper())
+    side = _DIR_LABEL.get(row["direction"], (row["direction"] or "?").upper())
     side_icon = "📈" if row["direction"] == "long" else "📉"
     market_fa = (
         "🪙 کریپتو" if (row["market"] or "crypto") == "crypto" else "💵 فارکس"
@@ -3134,13 +3164,46 @@ def _recent_detail_text(row) -> str:
         f"{_result_emoji(hit)} {_RESULT_LABELS.get(hit, '—')}" if hit else "—"
     )
     mood = _MOOD_LABELS.get(row["mood"], row["mood"]) if row["mood"] else "—"
-    notes = _ESC(row["notes"]) if row["notes"] else "—"
+
+    is_two_phase = (_row_get(row, "source") or "") == "open"
+    entry_time = _row_get(row, "entry_time")
+    exit_time = _row_get(row, "exit_time")
+    entry_reason = _row_get(row, "entry_reason")
+    exit_reason = _row_get(row, "exit_reason")
+    exit_photos = _row_get(row, "exit_photos")
+
+    # Date & times: two-phase trades know the exit date plus entry/exit hours;
+    # /trade rows keep their single (optionally time-stamped) date.
+    date_line = f"• 📅 تاریخ: {_ESC(row['trade_date'])}"
+    time_bits = []
+    if entry_time:
+        time_bits.append(f"ورود {entry_time}")
+    if exit_time:
+        time_bits.append(f"خروج {exit_time}")
+    time_line = f"• 🕐 ساعت: {' · '.join(time_bits)}" if time_bits else None
+
+    # Reasons: /trade stores the entry reason in `notes`; two-phase trades
+    # carry separate entry_reason / exit_reason columns.
+    entry_reason_txt = _ESC(entry_reason or row["notes"]) if (
+        entry_reason or row["notes"]
+    ) else "—"
+    reason_lines = [f"• 💭 دلیل ورود: {entry_reason_txt}"]
+    if exit_reason:
+        reason_lines.append(f"• 🧯 دلیل خروج: {_ESC(exit_reason)}")
+
     shots = []
     if row["screenshot"]:
         shots.append("قبل")
     if row["screenshot_after"]:
         shots.append("بعد")
+    exit_shot_count = len([n for n in (exit_photos or "").splitlines() if n])
+    if exit_shot_count:
+        shots.append(f"خروج ×{_fa_num(exit_shot_count)}")
     shots_txt = "  •  ".join(shots) if shots else "—"
+
+    badge = (
+        "\n• 🔁 ثبت دو مرحله‌ای — باز شد، بعداً بسته شد" if is_two_phase else ""
+    )
     return (
         f"{emoji} معامله #{row['id']} — <b>{_ESC(row['symbol'])}</b>\n"
         f"{side_icon} {side}  •  {market_fa}  •  ⏱ {tf}\n"
@@ -3151,17 +3214,19 @@ def _recent_detail_text(row) -> str:
         f"• 🛑 ضرر: <code>{sl}</code>\n"
         "\n"
         f"• نتیجه: {result}\n"
-        f"• 💰 مارجین: {_fmt_size(row['size'])}\n"
+        f"• 💰 مارجین: {_fmt_size(row['size']) if row['size'] else '—'}\n"
         f"• ⚡ اهرم: {lev}\n"
         f"• ⚠️ ریسک: {risk}\n"
         "\n"
-        f"• 📅 تاریخ: {_ESC(row['trade_date'])}\n"
-        f"• 🧠 حالت: {_ESC(mood)}\n"
-        f"• 💭 دلیل: {notes}\n"
+        f"{date_line}\n"
+        + (f"{time_line}\n" if time_line else "")
+        + f"• 🧠 حالت: {_ESC(mood)}\n"
+        + "\n".join(reason_lines) + "\n"
         f"• 📸 عکس: {shots_txt}\n"
         "\n"
-        f"💵 سود و زیان: <b>{_fmt_pnl(row['pnl']) if row['pnl'] is not None else '—'}</b>\n"
+        f"💵 سود و زیان: <b>{_fmt_pnl(row['pnl'])}</b>\n"
         f"📊 بازدهی (ROI): <b>{_fmt_roi(roi)}</b>"
+        + badge
     )
 
 
@@ -3203,13 +3268,23 @@ def _recent_panel_kb(rows: list, page: int, pages: int) -> InlineKeyboardMarkup:
 
 
 def _recent_detail_kb(
-    trade_id: int, has_shots: bool = False
+    trade_id: int,
+    has_shots: bool = False,
+    has_exit_shots: bool = False,
 ) -> InlineKeyboardMarkup:
-    """Buttons on a sent detail message: 📷 (with shots), 🗑 delete, ❌ close."""
+    """Buttons on a sent detail: 📷 entry shots, 📸 exit shots, 🗑, ❌."""
     rows = []
     if has_shots:
         rows.append(
             [InlineKeyboardButton("📷 عکس چارت", callback_data=_RCB_PHOTO + str(trade_id))]
+        )
+    if has_exit_shots:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "📸 عکس‌های خروج", callback_data=_RCB_XPHOTO + str(trade_id)
+                )
+            ]
         )
     rows.append(
         [
@@ -3249,6 +3324,39 @@ async def _send_trade_photos(update: Update, trade_id: int) -> None:
     if not sent_any:
         await update.effective_chat.send_message(
             f"معامله #{trade_id} اسکرین‌شات ندارد."
+        )
+
+
+async def _send_exit_photos(update: Update, trade_id: int) -> None:
+    """Send the exit screenshots of a two-phase trade (📸 button on the detail)."""
+    row = db.get_trade(trade_id)
+    if row is None:
+        await update.effective_chat.send_message(
+            f"معامله‌ای با شماره #{trade_id} پیدا نشد."
+        )
+        return
+    names = [
+        n
+        for n in (_row_get(row, "exit_photos") or "").splitlines()
+        if n
+    ]
+    sent_any = False
+    for i, name in enumerate(names, start=1):
+        path = _screenshot_path(name)
+        if not path.is_file():
+            continue
+        with path.open("rb") as photo:
+            await update.effective_chat.send_photo(
+                photo,
+                caption=(
+                    f"#{trade_id} {row['symbol']} {row['trade_date']}"
+                    f" — خروج {_fa_num(i)}/{_fa_num(len(names))}"
+                ),
+            )
+        sent_any = True
+    if not sent_any:
+        await update.effective_chat.send_message(
+            f"معامله #{trade_id} اسکرین‌شات خروج ندارد."
         )
 
 

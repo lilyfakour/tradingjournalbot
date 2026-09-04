@@ -22,7 +22,7 @@ data and the spreadsheet column layout keep working.
 | Command | What it does |
 | --- | --- |
 | `/trade` | 📈 **ثبت معامله بسته‌شده** (after you have exited): بازار (🪙 کریپتو / 💵 فارکس) -> symbol (recent / most-used as buttons) -> 📈 Long / 📉 Short -> Leverage (skippable) -> timeframe -> Entry -> 🎯 Take Profit -> 🛑 Stop Loss -> نتیجه (✅ Win / ❌ Loss / ➖ BE) -> 💰 Margin -> ⚠️ Risk % (skippable) -> date (📅 امروز) -> hour (**🕐 الان** fills the current time) -> دلیل ورود -> Mood -> 📸 screenshot before -> 📸 screenshot after -> ✅ ذخیره / ❌ ثبت نشود. **P&L and ROI are calculated automatically** from margin × leverage × price move — the trader is never asked |
-| `/recent` | Paginated **inline panel** — **one button per trade** (result emoji + id + pair + P&L, 📷 if screenshots) with ◀️/▶️ paging, an All/1W/1M range filter, and a 🏠 Home button. Tapping a trade **sends a separate, airy detail message** (all fields with bullets, emoji labels and blank lines) carrying 📷 عکس چارت (only when the trade has screenshots — re-sends the before/after photos) + 🗑 Delete + ❌ Close; deleting confirms on the detail and refreshes the panel |
+| `/recent` | Paginated **inline panel** — **one button per trade** (result emoji + id + pair + P&L or —, 📷 if screenshots, 🔁 if it was a two-phase open→close trade) with ◀️/▶️ paging, an All/1W/1M range filter, and a 🏠 Home button. Tapping a trade **sends a separate, airy detail message** (all fields with bullets, emoji labels and blank lines) carrying 📷 عکس چارت (entry before/after shots) + 📸 عکس‌های خروج (the up-to-4 exit shots of two-phase trades) + 🗑 Delete + ❌ Close; deleting confirms on the detail and refreshes the panel |
 | `/open` | 🟢 **ثبت معامله باز جدید** — a dedicated button on the main menu (📈 بستن معامله · **🟢 ثبت معامله باز**) starts the open-trade questionnaire straight away: بازار → symbol → Long/Short → timeframe → دلیل ورود → 📸 entry screenshot (optional) → entry date → entry hour (**🕐 الان** fills the current time) → Risk → Entry → 🎯 TP → 🛑 SL → confirm. Saved to «معاملات باز», **not** the history |
 | `/opens` | 🟢 **Open trades panel** — one button per running position (entry price + 📷 mark) with ◀️/▶️ paging, **➕ ثبت معامله باز** to start the questionnaire, and 🏠 Home. Tapping a trade sends its detail card |
 | `/close <id>` | 🏁 Close an open trade (same flow as the 🏁 button on its detail card): status (✅ Win/TP · ❌ Loss/SL · ➖ BE · ✏️ Manual exit) → exit date → exit time (**🕐 الان** fills the current time) → exit price (**auto-filled** for TP/SL/BE) → up to **4 exit screenshots** → دلیل خروج → Mood → confirm; the trade then moves into the normal history, `/recent` and `/stats` |
@@ -169,8 +169,13 @@ questionnaire.
 Because the close questionnaire has no margin question, P&L for these trades
 is stored as *unknown* (NULL — never a fake 0): the stats panel still counts
 them as Win/Loss/BE from the status and the price direction, and `/recent`
-shows «—» instead of a made-up dollar amount. The 🗑 button deletes an open
-trade (and its screenshots) without ever touching the history.
+shows «—» instead of a fabricated amount. In `/recent` such trades carry a 🔁
+mark, and their detail card shows both reasons (ورود/خروج), the entry and exit
+hours, the exit-photo count and — when exit shots exist — a
+📸 عکس‌های خروج button that re-sends them one by one. The stats panel renders
+«—» for P&L sums that only cover two-phase trades, so it can never crash on
+them. The 🗑 button on an open trade's detail deletes it (and its screenshots)
+without ever touching the history.
 
 ## Data
 
