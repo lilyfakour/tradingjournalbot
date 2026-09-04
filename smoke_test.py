@@ -29,6 +29,7 @@ journal.SCREENSHOT_DIR = _TMP / "shots"
 export.EXPORT_DIR = _TMP / "exports"
 
 from telegram import (  # noqa: E402
+    CallbackQuery,
     Chat,
     InlineKeyboardMarkup,
     Message,
@@ -1287,33 +1288,14 @@ async def main() -> int:
         "BE close stored with the entry price as exit",
     )
 
-    # --- 🟢 empty panel auto-starts the questionnaire; ➕ button dispatches ------
-    class FakeApplication:
-        def __init__(self):
-            self.updates = []
-
-        async def process_update(self, update):
-            self.updates.append(update)
-
-    app_empty = FakeApplication()
-    ectx = FakeContext()
-    ectx.application = app_empty
-    await journal.open_trades(upd.text("/open"), ectx)
+    # --- 🟢 /open with nothing open: empty panel with ➕ (no auto-start) ---------
+    empty_upd = FakeUpdate()
+    await journal.open_trades(empty_upd.text("/open"), FakeContext())
+    empty_flat = _inline_flat(_last_markup(empty_upd))
     check(
-        len(app_empty.updates) == 1
-        and app_empty.updates[0].message.text == "➕ ثبت معامله باز",
-        "empty 🟢 panel auto-starts the questionnaire (synthetic ➕ text)",
-    )
-
-    app_add = FakeApplication()
-    add_ctx = FakeContext()
-    add_ctx.application = app_add
-    add_upd = FakeOpenCallbackUpdate("opn:add")
-    await journal.on_open_callback(add_upd, add_ctx)
-    check(
-        len(app_add.updates) == 1
-        and app_add.updates[0].message.text == "➕ ثبت معامله باز",
-        "➕ panel button dispatches the questionnaire entry",
+        ("➕ ثبت معامله باز", "opn:add") in empty_flat
+        and "باز نیست" in empty_upd.sent[-1][1],
+        "empty 🟢 panel shows ➕ (no synthetic questionnaire start)",
     )
 
     # --- mood parsing details ---------------------------------------------------
@@ -1901,6 +1883,18 @@ async def main() -> int:
         )
 
     # --- 🟢 open/close conversation wiring (real PTB routing) -------------------
+    def _cb_update(data):
+        """A real CallbackQuery update, like an inline-button tap produces."""
+        msg = Message(message_id=9, date=_dt.now(), chat=_chat, from_user=_user)
+        cq = CallbackQuery(
+            id="cb1",
+            from_user=_user,
+            chat_instance="ci",
+            data=data,
+            message=msg,
+        )
+        return Update(update_id=9, callback_query=cq)
+
     open_conv = journal.build_open_conversation()
 
     def _open_entry(update):
@@ -1908,10 +1902,18 @@ async def main() -> int:
         open_conv._conversations.clear()
         return result[2] if result else None
 
-    handler = _open_entry(_text_update("➕ ثبت معامله باز"))
+    handler = _open_entry(_cb_update("opn:add"))
     check(
-        getattr(handler, "callback", None) is journal.open_trade_start,
-        "➕ text enters the open conversation",
+        getattr(handler, "callback", None) is journal.open_trades_add_entry,
+        "➕ panel button enters the open conversation (entry point)",
+    )
+    check(
+        _open_entry(_cb_update("opn:noop")) is None,
+        "other opn taps don't start the conversation",
+    )
+    check(
+        _open_entry(_text_update("➕ ثبت معامله باز")) is None,
+        "plain ➕ text no longer starts the flow (button-only entry)",
     )
     check(
         _open_entry(_text_update("🟢 معاملات باز")) is None,
@@ -1949,6 +1951,23 @@ async def main() -> int:
         )
 
     close_conv = journal.build_close_conversation()
+
+    def _close_entry(update):
+        result = close_conv.check_update(update)
+        close_conv._conversations.clear()
+        return result[2] if result else None
+
+    handler = _close_entry(_cb_update("opn:c:12"))
+    check(
+        getattr(handler, "callback", None) is journal.open_trades_close_entry,
+        "🏁 detail button enters the close conversation (entry point)",
+    )
+    handler = _close_entry(_text_update("/close 12"))
+    check(
+        getattr(handler, "callback", None) is journal.close_start_text,
+        "/close <id> enters the close conversation",
+    )
+
     ckey = close_conv._get_key(_text_update("long"))
 
     def _routed_close(st, update):

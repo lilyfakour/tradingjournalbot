@@ -23,7 +23,7 @@ data and the spreadsheet column layout keep working.
 | --- | --- |
 | `/trade` | Guided entry: بازار (🪙 کریپتو / 💵 فارکس) -> symbol (recent / most-used as buttons) -> 📈 Long / 📉 Short -> Leverage (skippable) -> timeframe -> Entry -> 🎯 Take Profit -> 🛑 Stop Loss -> نتیجه (✅ Win / ❌ Loss / ➖ BE) -> 💰 Margin -> ⚠️ Risk % (skippable) -> date (📅 امروز) -> hour -> دلیل ورود -> Mood -> 📸 screenshot before -> 📸 screenshot after -> ✅ ذخیره / ❌ ثبت نشود. **P&L and ROI are calculated automatically** from margin × leverage × price move — the trader is never asked |
 | `/recent` | Paginated **inline panel** — **one button per trade** (result emoji + id + pair + P&L, 📷 if screenshots) with ◀️/▶️ paging, an All/1W/1M range filter, and a 🏠 Home button. Tapping a trade **sends a separate, airy detail message** (all fields with bullets, emoji labels and blank lines) carrying 📷 عکس چارت (only when the trade has screenshots — re-sends the before/after photos) + 🗑 Delete + ❌ Close; deleting confirms on the detail and refreshes the panel |
-| `/open` | 🟢 **Open trades panel** — one button per running position (entry price + 📷 mark) with ◀️/▶️ paging, **➕ ثبت معامله باز** to start the questionnaire, and 🏠 Home. Tapping a trade sends its detail card; with no open trades the questionnaire starts automatically |
+| `/open` | 🟢 **Open trades panel** — one button per running position (entry price + 📷 mark) with ◀️/▶️ paging, **➕ ثبت معامله باز** to start the questionnaire, and 🏠 Home. Tapping a trade sends its detail card; with nothing open it shows the empty panel with the same ➕ button |
 | `/close <id>` | 🏁 Close an open trade (same flow as the 🏁 button on its detail card): status (✅ Win/TP · ❌ Loss/SL · ➖ BE · ✏️ Manual exit) → exit date → exit time → exit price (**auto-filled** for TP/SL/BE) → up to **4 exit screenshots** → دلیل خروج → Mood → confirm; the trade then moves into the normal history, `/recent` and `/stats` |
 | `/stats` | Filterable performance panel with **inline buttons attached to the message** (period, symbol, reset, export); `/stats BTCUSD 1w` style arguments still work |
 | `/delete <id>` | Delete a trade, e.g. `/delete 12` |
@@ -146,8 +146,8 @@ sends its detail card — entry, TP, SL, risk, date/time, entry reason and a
 📷 button for the entry chart — carrying **🏁 Close trade**, 🗑 حذف and
 ❌ بستن.
 
-- **Phase 1 — register:** press **➕ ثبت معامله باز** on the 🟢 panel (or tap
-  🟢 when nothing is open). The questionnaire asks بازار، نماد، جهت،
+- **Phase 1 — register:** tap 🟢 معاملات باز (or `/open`) and press
+  **➕ ثبت معامله باز** on the panel. The questionnaire asks بازار، نماد، جهت،
   تایم‌فریم، دلیل ورود، 📸 اسکرین‌شات ورود (اختیاری)، تاریخ ورود، ساعت ورود،
   ⚠️ Risk، Entry، 🎯 TP و 🛑 SL — in that order — then shows the confirmation
   summary and saves the position to «معاملات باز».
@@ -261,14 +261,19 @@ for `journal.db` and the screenshots.
 
 ## Test
 
-An offline smoke test covers the whole `/trade`, `/open` and `/close` flows
+Two offline suites cover the whole `/trade`, `/open` and `/close` flows
 (reply-keyboard buttons, typed fallbacks, timeframe parsing, screenshot
-handling, PTB routing, database writes, migration). It uses a throwaway
-database and temp folder, so it is safe to run anytime:
+handling, PTB routing, database writes, migration). They use a throwaway
+database and temp folder, so they are safe to run anytime:
 
 ```powershell
-.\.venv\Scripts\python.exe smoke_test.py
+.\.venv\Scripts\python.exe smoke_test.py   # 300+ checks, fake Telegram objects
+.\.venv\Scripts\python.exe ptb_probe.py    # real PTB conversations with a stub Bot
 ```
+
+`ptb_probe.py` drives genuine `ConversationHandler.check_update` /
+`handle_update` calls with bot-bound updates — it exists to catch wiring bugs
+that fake objects cannot see (e.g. shortcuts needing a bound bot).
 
 ## Project layout
 
@@ -279,4 +284,5 @@ database and temp folder, so it is safe to run anytime:
   list, stats)
 - `export.py` — spreadsheet export used by `/export` (openpyxl)
 - `smoke_test.py` — offline checks for the `/trade` flow (no Telegram needed)
+- `ptb_probe.py` — real-PTB conversation probe (stub Bot, no network)
 - `screenshots/` — downloaded chart screenshots (created on demand)

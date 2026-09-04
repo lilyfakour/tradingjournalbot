@@ -31,11 +31,9 @@ from typing import Optional
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     Update,
-    User,
 )
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
@@ -1890,11 +1888,11 @@ _OPEN_CB_RE = re.compile(
     r"|c:(?P<close>\d+)|d:(?P<del>\d+)|home|close|noop|add)$"
 )
 
-# The ➕ panel button starts the questionnaire by dispatching a synthetic
-# message with this text through the application (it matches ONLY the
-# conversation's dedicated entry regex, so it can never loop back into the
-# panel handler).
-_ADD_RE = re.compile(r"^\s*➕\s*ثبت\s*معامله\s*باز\s*$")
+# The ➕ panel button and the 🏁 detail button are ENTRY POINTS of their
+# conversations (CallbackQueryHandler entry points), so the flows start
+# directly from those taps — no synthetic-message dispatch involved.
+_OPEN_ADD_RE = re.compile(r"^" + re.escape(_OCB_ADD) + r"$")
+_OPEN_CLOSE_RE = re.compile(r"^" + re.escape(_OCB_CLOSE) + r"(?P<id>\d+)$")
 
 # Page the user is currently browsing (same idea as _recent_page).
 _open_page = 1
@@ -2005,8 +2003,16 @@ async def open_trades(
     _open_page = 1
     total = db.count_open_trades()
     if not total:
-        # Nothing to show yet — jump straight into the questionnaire.
-        await _start_open_conversation(update, context)
+        # Nothing to show yet — still send the panel (➕ starts the flow)
+        # so the button always behaves the same way.
+        rows: list = []
+        message = await update.effective_chat.send_message(
+            "🟢 <b>معاملات باز</b>\n\n"
+            "معامله‌ای باز نیست. با دکمه زیر یک معاملهٔ باز ثبت کنید:",
+            reply_markup=_open_panel_kb(rows, 1, 1),
+            parse_mode=ParseMode.HTML,
+        )
+        context.user_data["open_panel_msg"] = message.message_id
         return
     pages = max(1, math.ceil(total / _RECENT_PER_PAGE))
     rows = db.get_open_trades(_RECENT_PER_PAGE, offset=0)
@@ -2018,41 +2024,25 @@ async def open_trades(
     context.user_data["open_panel_msg"] = message.message_id
 
 
-async def _start_open_conversation(
+async def open_trades_add_entry(
     update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Start the open-trades questionnaire programmatically.
+) -> int:
+    """➕ panel button — entry point of the open-trades questionnaire."""
+    await update.callback_query.answer()
+    return await open_trade_start(update, context)
 
-    The ➕ panel button (and the empty 🟢 panel) cannot return a state of a
-    ConversationHandler they are not part of, so a synthetic text update is
-    pushed through the application: it matches ONLY the conversation's ➕
-    entry point, which then runs the normal flow.
-    """
-    chat = update.effective_chat
-    user = getattr(update, "effective_user", None) or User(
-        id=chat.id, first_name="", is_bot=False
-    )
-    message_id = (
-        getattr(getattr(update, "effective_message", None), "message_id", None)
-        or 1
-    )
-    message = Message(
-        message_id=message_id,
-        date=datetime.now(),
-        chat=chat,
-        from_user=user,
-        text="➕ ثبت معامله باز",
-    )
-    try:
-        await context.application.process_update(
-            Update(update_id=1, message=message)
-        )
-    except Exception:
-        logger.error(
-            "Could not auto-start the open-trade flow:\n%s",
-            traceback.format_exc(),
-        )
-        await chat.send_message("برای ثبت معامله باز، /open را بفرستید.")
+
+async def open_trades_close_entry(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """🏁 detail button — entry point of the close-an-open-trade flow."""
+    match = _OPEN_CLOSE_RE.match(update.callback_query.data or "")
+    if match is None:
+        await update.callback_query.answer()
+        return ConversationHandler.END
+    open_id = int(match.group("id"))
+    await update.callback_query.answer()
+    return await _close_begin(open_id, update, context)
 
 
 async def on_open_callback(
@@ -2188,11 +2178,9 @@ async def on_open_callback(
             reply_markup=_STATUS_KEYBOARD,
         )
         return
-    # home / close-msg / add / noop
+    # home / close-msg / noop  (➕ and 🏁 are conversation entry points)
     await query.answer()
-    if match.group(0) == _OCB_ADD:
-        await _start_open_conversation(update, context)
-    elif match.group(0) == _OCB_HOME:
+    if match.group(0) == _OCB_HOME:
         context.user_data.pop("open_panel_msg", None)
         try:
             await query.edit_message_reply_markup(reply_markup=None)
@@ -2218,11 +2206,17 @@ async def open_trade_start(
     """Start the open-trades questionnaire with the market question."""
     _drop_screenshot(context)
     context.user_data.clear()
-    await update.message.reply_text(
+    text = (
         "معامله باز جدید — در کدام بازار معامله کردی؟\n"
-        "(برای انصراف /cancel را بفرستید)",
-        reply_markup=_MARKET_KEYBOARD,
+        "(برای انصراف /cancel را بفرستید)"
     )
+    if update.message is not None:
+        await update.message.reply_text(text, reply_markup=_MARKET_KEYBOARD)
+    else:
+        # Entry via the ➕ button: there is no message to reply to.
+        await update.effective_chat.send_message(
+            text, reply_markup=_MARKET_KEYBOARD
+        )
     return OPEN_MARKET
 
 
@@ -2969,13 +2963,13 @@ async def save_close_trade(
 def build_open_conversation() -> ConversationHandler:
     """Build the 🟢 open-trades questionnaire handler.
 
-    There is no typed entry point: the flow starts from the ➕ button on the
-    🟢 panel (or automatically when the panel would be empty) via the synthetic
-    ➕ text, so /open and 🟢 always land on the panel itself.
+    The ➕ button on the 🟢 panel is the conversation's entry point
+    (CallbackQueryHandler), so the flow starts directly from that tap. /open
+    and the 🟢 menu button always land on the panel itself.
     """
     return ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex(_ADD_RE), open_trade_start),
+            CallbackQueryHandler(open_trades_add_entry, pattern=_OPEN_ADD_RE),
         ],
         states={
             OPEN_MARKET: [MessageHandler(_ANSWER, ask_open_market)],
@@ -3002,13 +2996,21 @@ def build_open_conversation() -> ConversationHandler:
             MessageHandler(filters.Regex(_CANCEL_RE), cancel),
         ],
         allow_reentry=True,
+        per_message=False,
     )
 
 
 def build_close_conversation() -> ConversationHandler:
-    """Build the 🏁 close-an-open-trade questionnaire handler."""
+    """Build the 🏁 close-an-open-trade questionnaire handler.
+
+    Entry points: the 🏁 button on an open-trade detail card and the
+    /close <id> command.
+    """
     return ConversationHandler(
-        entry_points=[CommandHandler("close", close_start_text)],
+        entry_points=[
+            CallbackQueryHandler(open_trades_close_entry, pattern=_OPEN_CLOSE_RE),
+            CommandHandler("close", close_start_text),
+        ],
         states={
             CLOSE_STATUS: [MessageHandler(_ANSWER, ask_close_status)],
             CLOSE_DATE: [MessageHandler(_ANSWER, ask_close_date)],
@@ -3029,6 +3031,7 @@ def build_close_conversation() -> ConversationHandler:
             MessageHandler(filters.Regex(_CANCEL_RE), cancel),
         ],
         allow_reentry=True,
+        per_message=False,
     )
 
 
