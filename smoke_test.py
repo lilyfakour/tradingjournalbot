@@ -829,8 +829,32 @@ async def main() -> int:
         "500" in upd.sent[-1][1] and "—" not in upd.sent[-1][1].split("بودجهٔ فعلی")[1][:40],
         "settings: prompt shows the stored budget",
     )
+    await journal.settings_budget_value(upd.text("۵۰۰"), bctx)
+    check(
+        db.get_budget() == 500.0,
+        "settings: Persian digits (۵۰۰) accepted after the prompt",
+    )
+    _before = db.get_budget()
+    await journal.settings_budget_value(upd.text("123"), FakeContext())
+    check(
+        db.get_budget() == _before,
+        "settings: a bare number WITHOUT the armed prompt is ignored",
+    )
+    _expired = FakeContext()
+    _expired.user_data["_budget_prompt"] = 0  # armed a very long time ago
+    await journal.settings_budget_value(upd.text("123"), _expired)
+    check(
+        db.get_budget() == _before,
+        "settings: the budget prompt expires (stray numbers stay ignored)",
+    )
+    await journal.settings_budget(upd.text("💰 بودجه"), bctx)
     await journal.settings_budget_value(upd.text("حذف"), bctx)
     check(db.get_budget() is None, "settings: 'حذف' clears the budget")
+    await journal.settings_budget_value(upd.text("budget 750"), FakeContext())
+    check(
+        db.get_budget() == 750.0,
+        "settings: explicit 'budget 750' works without the prompt",
+    )
     db.set_budget(500.0)  # kept for the margin tests below
     check(db.get_budget() == 500.0, "settings: db.set_budget/get_budget round-trip")
 
@@ -1825,6 +1849,32 @@ async def main() -> int:
         if text.startswith("/"):
             msg.set_bot(_BotStub())
         return Update(update_id=2, message=msg)
+
+    # REGRESSION (reported: sending an amount to set the budget was dead —
+    # the value handler's old filter matched only "budget 500", so a bare
+    # "500" hit NO handler and the bot stayed silent). Route REAL PTB
+    # updates through the settings handlers, like production would.
+    _sh = journal.build_settings_handlers()
+    _budget_value_h = next(
+        h for h in _sh if h.callback is journal.settings_budget_value
+    )
+    _budget_menu_h = next(
+        h for h in _sh if h.callback is journal.settings_budget
+    )
+    for _txt in ("500", "۵۰۰", "1250.50", "budget: 500", "budget 500 usd", "حذف"):
+        check(
+            bool(_budget_value_h.check_update(_text_update(_txt))),
+            f"budget answer '{_txt}' routes to the value handler",
+        )
+    for _txt in ("hello", "0.5%", "🧮 محاسبه خودکار", "-1", "wasd", "💰 بودجه"):
+        check(
+            not _budget_value_h.check_update(_text_update(_txt)),
+            f"non-budget text '{_txt}' is not swallowed by the value handler",
+        )
+    check(
+        bool(_budget_menu_h.check_update(_text_update("💰 بودجه"))),
+        "💰 بودجه routes to the prompt handler",
+    )
 
     def _photo_update():
         msg = Message(

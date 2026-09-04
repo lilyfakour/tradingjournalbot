@@ -464,8 +464,17 @@ async def export_trades(
 # The budget feeds the open questionnaire's auto-margin calculation.
 # --------------------------------------------------------------------------
 _BUDGET_RE = re.compile(r"^\s*💰\s*(?:budget|بودجه)\s*$", re.IGNORECASE)
-_SET_BUDGET_RE = re.compile(
-    r"^\s*(?:⚙️\s*)?budget\s*(?::|=\s*|\s)\s*(\d+(?:\.\d+)?)\s*(?:usd|دلار)?\s*$",
+# What the trader may send as the budget value: the explicit "budget 500"
+# style, a bare number (right after the 💰 prompt), or a clear word. The
+# prompt-armed gate lives in the callback, not in the filter — filters see
+# only the update, so a wide filter + callback gate is the reliable split.
+_BUDGET_VALUE_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:⚙️\s*)?budget\s*(?::|=\s*|\s)\s*(?P<explicit>\d+(?:\.\d+)?)"
+    r"\s*(?:usd|دلار)?"
+    r"|(?P<bare>\d+(?:\.\d+)?)"
+    r"|(?P<clear>حذف|remove|clear|هیچ|-)"
+    r")\s*$",
     re.IGNORECASE,
 )
 
@@ -503,8 +512,9 @@ async def settings_budget(
     """💰 بودجه tapped (or /settings budget ...) — prompt for the number."""
     budget = db.get_budget()
     current = f"{_fmt_num(budget)} $" if budget else "—"
-    # Arm the free-number listener: the next bare number becomes the budget.
-    context.user_data["_budget_prompt"] = True
+    # Arm the free-number listener (expires, see _budget_armed below): the
+    # next bare number sent soon after this prompt becomes the budget.
+    context.user_data["_budget_prompt"] = datetime.now().timestamp()
     await update.effective_chat.send_message(
         f"💰 بودجهٔ فعلی: <b>{current}</b>\n\n"
         "عدد بودجه را به دلار بفرستید (مثلاً 500 یا 1250.50) "
@@ -513,25 +523,46 @@ async def settings_budget(
     )
 
 
+def _budget_armed(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """True while the 💰 prompt is fresh (10 minutes)."""
+    armed_ts = context.user_data.get("_budget_prompt")
+    return isinstance(armed_ts, (int, float)) and (
+        datetime.now().timestamp() - armed_ts
+    ) < 600
+
+
 async def settings_budget_value(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Store the budget typed after the 💰 prompt (or via /settings budget N)."""
     raw = (update.message.text or "").strip()
-    m = _SET_BUDGET_RE.match(raw)
-    if not m and not context.user_data.get("_budget_prompt"):
-        # A bare number outside the budget prompt is ignored — storing a
-        # budget from it would be a surprising side effect.
+    # Persian keyboards send ۰-۹ (and some Androids ٠-٩) — normalize first,
+    # otherwise "۵۰۰" would silently match nothing.
+    raw = raw.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")).translate(
+        str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+    )
+    m = _BUDGET_VALUE_RE.match(raw)
+    if m is None:  # not a budget answer (the filter should prevent this)
         return
-    if raw.lower() in ("حذف", "remove", "clear", "هیچ", "-"):
+    armed = _budget_armed(context)
+    if m.group("clear") is not None:
+        if not armed:
+            return  # "حذف" outside the budget prompt means nothing
         context.user_data.pop("_budget_prompt", None)
         db.set_budget(None)
         await update.message.reply_text(
             "💰 بودجه پاک شد.", reply_markup=_SETTINGS_KEYBOARD
         )
         return
-    number = _parse_positive(m.group(1)) if m else _parse_positive(raw)
-    if number is None:
+    if m.group("explicit"):
+        number = _parse_positive(m.group("explicit"))
+    elif armed:
+        number = _parse_positive(m.group("bare"))
+    else:
+        # A bare number outside the budget prompt is ignored — storing a
+        # budget from it would be a surprising side effect.
+        return
+    if number is None:  # unreachable with the current regex; keep the guard
         await update.message.reply_text(
             "عدد نامعتبر — مثلاً 500 یا 1250.50 بفرستید (دلار):"
         )
@@ -549,7 +580,7 @@ def build_settings_handlers() -> list[MessageHandler]:
     """Handlers for the settings menu (⚙️ panel, 💰 budget, typed value)."""
     return [
         MessageHandler(filters.Regex(_BUDGET_RE), settings_budget),
-        MessageHandler(filters.Regex(_SET_BUDGET_RE), settings_budget_value),
+        MessageHandler(filters.Regex(_BUDGET_VALUE_RE), settings_budget_value),
     ]
 
 
