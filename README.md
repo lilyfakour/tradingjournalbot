@@ -23,10 +23,11 @@ data and the spreadsheet column layout keep working.
 | --- | --- |
 | `/trade` | 📈 **ثبت معامله بسته‌شده** (after you have exited): بازار (🪙 کریپتو / 💵 فارکس) -> symbol (recent / most-used as buttons) -> 📈 Long / 📉 Short -> Leverage (skippable) -> timeframe -> Entry -> 🎯 Take Profit -> 🛑 Stop Loss -> نتیجه (✅ Win / ❌ Loss / ➖ BE) -> 💰 Margin -> ⚠️ Risk % (skippable) -> date (📅 امروز) -> hour (**🕐 الان** fills the current time) -> دلیل ورود -> Mood -> 📸 screenshot before -> 📸 screenshot after -> ✅ ذخیره / ❌ ثبت نشود. **P&L and ROI are calculated automatically** from margin × leverage × price move — the trader is never asked |
 | `/recent` | Paginated **inline panel** — **one button per trade** (result emoji + id + pair + P&L or —, 📷 if screenshots, 🔁 if it was a two-phase open→close trade) with ◀️/▶️ paging, an All/1W/1M range filter, and a 🏠 Home button. Tapping a trade **sends a separate, airy detail message** (all fields with bullets, emoji labels and blank lines) carrying 📷 عکس چارت (entry before/after shots) + 📸 عکس‌های خروج (the up-to-4 exit shots of two-phase trades) + 🗑 Delete + ❌ Close; deleting confirms on the detail and refreshes the panel |
-| `/open` | 🟢 **ثبت معامله باز جدید** — a dedicated button on the main menu (📈 بستن معامله · **🟢 ثبت معامله باز**) starts the open-trade questionnaire straight away: بازار → symbol → Long/Short → timeframe → دلیل ورود → 📸 entry screenshot (optional) → entry date → entry hour (**🕐 الان** fills the current time) → Risk → Entry → 🎯 TP → 🛑 SL → confirm. Saved to «معاملات باز», **not** the history |
+| `/open` | 🟢 **ثبت معامله باز جدید** — a dedicated button on the main menu (📈 ثبت معامله بسته · **🟢 ثبت معامله باز**) starts the open-trade questionnaire straight away: بازار → symbol → Long/Short → timeframe → دلیل ورود → 📸 entry screenshot (optional) → entry date → entry hour (**🕐 الان** fills the current time) → Risk → 💰 Margin (**🧮 محاسبه خودکار** = بودجه × ریسک٪؛ مقادیر دستی که با ریسک نخواند با ⚠️ علام می‌خورند) → Entry → 🎯 TP → 🛑 SL → confirm. Saved to «معاملات باز», **not** the history |
 | `/opens` | 🟢 **Open trades panel** — one button per running position (entry price + 📷 mark) with ◀️/▶️ paging, **➕ ثبت معامله باز** to start the questionnaire, and 🏠 Home. Tapping a trade sends its detail card |
 | `/close <id>` | 🏁 Close an open trade (same flow as the 🏁 button on its detail card): status (✅ Win/TP · ❌ Loss/SL · ➖ BE · ✏️ Manual exit) → exit date → exit time (**🕐 الان** fills the current time) → exit price (**auto-filled** for TP/SL/BE) → up to **4 exit screenshots** → دلیل خروج → Mood → confirm; the trade then moves into the normal history, `/recent` and `/stats` |
 | `/stats` | Filterable performance panel with **inline buttons attached to the message** (period, symbol, reset, export); `/stats BTCUSD 1w` style arguments still work |
+| `/settings` | ⚙️ **تنظیمات** — the account **budget in USD** (💰 بودجه). The budget feeds the 🧮 محاسبه خودکار margin calculation of the open questionnaire; `حذف` clears it |
 | `/delete <id>` | Delete a trade, e.g. `/delete 12` |
 | `/export` | Download all trades as an `.xlsx` spreadsheet |
 | `/cancel` | Abort the current `/trade` entry |
@@ -72,11 +73,12 @@ prices, margin, custom date, notes).
   every command with a short emoji explanation. It is registered
   automatically when the bot starts (`set_my_commands`).
 - `/start`, `/help` or the 🏠 منو button send the **main-menu keyboard** —
-  persistent buttons under the input bar: 📈 بستن معامله · **🟢 ثبت معامله باز** /
-  🟢 معاملات باز · 📊 آمار / 🕘 معاملات اخیر · 📥 اکسل / 🏠 منو. The closed-trade
-  button is labeled «بستن معامله» so it can never be confused with the open-trade
-  one; 📈 بستن معامله and 🟢 ثبت معامله باز safely restart their questionnaires
-  even mid-entry. The bar is
+  persistent buttons under the input bar: 📈 ثبت معامله بسته · **🟢 ثبت معامله باز** /
+  🟢 معاملات باز · 📊 آمار / 🕘 معاملات اخیر · 📥 اکسل / ⚙️ تنظیمات · 🏠 منو.
+  The closed-trade button is labeled «ثبت معامله بسته» — it logs a trade that
+  was already exited (/trade) — so it can never be confused with the open-trade
+  one; 📈 ثبت معامله بسته and 🟢 ثبت معامله باز safely restart their questionnaires
+  even mid-entry, and ⚙️ تنظیمات opens the settings panel (budget). The bar is
   re-sent after saving, discarding or cancelling an entry, so the buttons
   never disappear (no `/start` needed).
 
@@ -153,8 +155,8 @@ questionnaire.
 - **Phase 1 — register:** tap **🟢 ثبت معامله باز** on the main menu (or ➕ on
   the 🟢 panel, or `/open`). The questionnaire asks بازار، نماد، جهت،
   تایم‌فریم، دلیل ورود، 📸 اسکرین‌شات ورود (اختیاری)، تاریخ ورود، ساعت ورود
-  (دکمه **🕐 الان** زمان همین حالا را ثبت می‌کند)، ⚠️ Risk، Entry، 🎯 TP و
-  🛑 SL — in that order — then shows the confirmation
+  (دکمه **🕐 الان** زمان همین حالا را ثبت می‌کند)، ⚠️ Risk، 💰 Margin، Entry،
+  🎯 TP و 🛑 SL — in that order — then shows the confirmation
   summary and saves the position to «معاملات باز».
 - **Phase 2 — close:** later, tap the trade in the 🟢 panel and press
   **🏁 Close trade** (or send `/close <id>`). The bot asks the status
@@ -166,16 +168,27 @@ questionnaire.
   the confirmation the position leaves the open list and appears in
   `/recent`, `/stats` and the Excel export.
 
-Because the close questionnaire has no margin question, P&L for these trades
-is stored as *unknown* (NULL — never a fake 0): the stats panel still counts
-them as Win/Loss/BE from the status and the price direction, and `/recent`
-shows «—» instead of a fabricated amount. In `/recent` such trades carry a 🔁
+The 💰 margin question (budget feature): type the committed USD amount, or tap
+**🧮 محاسبه خودکار** and the bot computes it from the configured budget —
+`مارجین = بودجه × ریسک٪ ÷ ۱۰۰` (⚙️ تنظیمات → 💰 بودجه sets the budget). A
+typed margin that differs from the risk-implied one by more than 10 % gets a
+⚠️ notice showing both numbers, with one-tap buttons to keep the bot's
+suggestion (✅ پیشنهاد ربات) or the trader's own figure (✍️ عدد خودم).
+
+Because older trades were closed without a margin question, P&L for margin-less
+closes is stored as *unknown* (NULL — never a fake 0): the stats panel still
+counts them as Win/Loss/BE from the status and the price direction, and
+`/recent` shows «—» instead of a fabricated amount. When a margin **is** known,
+the close stores the real `P&L = price-move ÷ entry × margin` and ROI
+(ROI from the rounded P&L — matching the database), previews them on the
+confirmation summary, and `/recent`, `/stats` and the Excel export show the
+actual dollar amounts. In `/recent` two-phase trades carry a 🔁
 mark, and their detail card shows both reasons (ورود/خروج), the entry and exit
 hours, the exit-photo count and — when exit shots exist — a
 📸 عکس‌های خروج button that re-sends them one by one. The stats panel renders
-«—» for P&L sums that only cover two-phase trades, so it can never crash on
-them. The 🗑 button on an open trade's detail deletes it (and its screenshots)
-without ever touching the history.
+«—» for P&L sums that only cover margin-less two-phase trades, so it can never
+crash on them. The 🗑 button on an open trade's detail deletes it (and its
+screenshots) without ever touching the history.
 
 ## Data
 

@@ -157,12 +157,13 @@ def _inline_flat(markup):
 
 def _home_labels():
     return [
-        "📈 بستن معامله",
+        "📈 ثبت معامله بسته",
         "🟢 ثبت معامله باز",
         "🟢 معاملات باز",
         "📊 آمار",
         "🕘 معاملات اخیر",
         "📥 اکسل",
+        "⚙️ تنظیمات",
         "🏠 منو",
     ]
 
@@ -762,8 +763,8 @@ async def main() -> int:
     )
     state = await journal.ask_open_risk(upd.text("1%"), octx)
     check(
-        state == journal.OPEN_ENTRY and octx.user_data["risk_percent"] == 1,
-        "open: risk -> OPEN_ENTRY",
+        state == journal.OPEN_MARGIN and octx.user_data["risk_percent"] == 1,
+        "open: risk -> OPEN_MARGIN (budget feature)",
     )
     state = await journal.ask_open_entry(upd.text("2000"), octx)
     check(state == journal.OPEN_TAKE_PROFIT, "open: entry -> OPEN_TAKE_PROFIT")
@@ -810,6 +811,75 @@ async def main() -> int:
         db.count_trades() == closed_before,
         "adding an open trade does not touch the closed list",
     )
+
+    # --- settings / budget feature ---------------------------------------------
+    bctx = FakeContext()
+    await journal.settings_budget(upd.text("💰 بودجه"), bctx)
+    check(
+        "بودجهٔ فعلی" in upd.sent[-1][1] and "—" in upd.sent[-1][1],
+        "settings: 💰 prompt shows the (unset) current budget",
+    )
+    await journal.settings_budget_value(upd.text("500"), bctx)
+    check(
+        db.get_budget() == 500.0 and "500" in upd.sent[-1][1],
+        "settings: typed number after the prompt becomes the budget",
+    )
+    await journal.settings_budget(upd.text("💰 بودجه"), bctx)
+    check(
+        "500" in upd.sent[-1][1] and "—" not in upd.sent[-1][1].split("بودجهٔ فعلی")[1][:40],
+        "settings: prompt shows the stored budget",
+    )
+    await journal.settings_budget_value(upd.text("حذف"), bctx)
+    check(db.get_budget() is None, "settings: 'حذف' clears the budget")
+    db.set_budget(500.0)  # kept for the margin tests below
+    check(db.get_budget() == 500.0, "settings: db.set_budget/get_budget round-trip")
+
+    # 🧮 auto margin = budget × risk% —
+    mctx = FakeContext()
+    mctx.user_data["risk_percent"] = 2  # 2% of 500 = 10
+    state = await journal.ask_open_margin(upd.text(journal.MARGIN_AUTO_BTN), mctx)
+    check(
+        state == journal.OPEN_ENTRY and mctx.user_data["margin"] == 10.0,
+        "open: 🧮 stores budget × risk% as the margin",
+    )
+    # Manual value within tolerance (exactly 10 % off) is accepted silently.
+    mctx.user_data.pop("margin")
+    mctx.user_data["risk_percent"] = 1  # auto = 1% of 500 = 5
+    state = await journal.ask_open_margin(upd.text("4.5"), mctx)  # auto = 5
+    check(
+        state == journal.OPEN_ENTRY and mctx.user_data["margin"] == 4.5,
+        "open: margin within 10% of auto is accepted without a notice",
+    )
+    # Manual value way off → ⚠️ notice + a one-tap switch to the auto value.
+    mctx.user_data.pop("margin")
+    state = await journal.ask_open_margin(upd.text("50"), mctx)  # auto = 5
+    check(
+        state == journal.OPEN_MARGIN and "پیشنهادی" in upd.sent[-1][1],
+        "open: far-off margin triggers the ⚠️ mismatch notice",
+    )
+    state = await journal.ask_open_margin(upd.text(journal.MARGIN_AUTO_FIX_BTN), mctx)
+    check(
+        state == journal.OPEN_ENTRY and mctx.user_data["margin"] == 5.0,
+        "open: ✅ پیشنهاد ربات stores the auto-calculated margin",
+    )
+    # ...or keep the trader's own number.
+    mctx.user_data.pop("margin")
+    await journal.ask_open_margin(upd.text("50"), mctx)
+    state = await journal.ask_open_margin(upd.text(journal.MARGIN_KEEP_BTN), mctx)
+    check(
+        state == journal.OPEN_ENTRY and mctx.user_data["margin"] == 50.0,
+        "open: ✍️ عدد خودم keeps the typed margin",
+    )
+    # 🧮 without a budget asks for a manual number instead of crashing.
+    db.set_budget(None)
+    mctx2 = FakeContext()
+    mctx2.user_data["risk_percent"] = 1
+    state = await journal.ask_open_margin(upd.text(journal.MARGIN_AUTO_BTN), mctx2)
+    check(
+        state == journal.OPEN_MARGIN and "بودجه" in upd.sent[-1][1],
+        "open: 🧮 without a budget explains what is missing",
+    )
+    db.set_budget(500.0)
 
     # --- symbol suggestions: most used + recently traded ----------------------
     ctx5 = FakeContext()
@@ -1879,6 +1949,8 @@ async def main() -> int:
     expected_menu = {
         "📊 آمار": journal.stats,
         "📊 Stats": journal.stats,  # English aliases still route
+        "⚙️ تنظیمات": journal.show_settings,
+        "⚙️ Settings": journal.show_settings,
         "🟢 معاملات باز": journal.open_trades,
         "🟢 Open trades": journal.open_trades,
         "🕘 معاملات اخیر": journal.recent,
@@ -1896,8 +1968,12 @@ async def main() -> int:
             f"menu button '{label}' routes to {fn.__name__}",
         )
     check(
+        _menu_routes("📈 ثبت معامله بسته") == [],
+        "📈 ثبت معامله بسته is handled by the conversation, not a standalone handler",
+    )
+    check(
         _menu_routes("📈 بستن معامله") == [],
-        "📈 بستن معامله is handled by the conversation, not a standalone handler",
+        "old 📈 بستن معامله wording still routes to the conversation",
     )
     check(
         _menu_routes("🟢 ثبت معامله باز") == [],
@@ -2024,6 +2100,8 @@ async def main() -> int:
         (journal.OPEN_TRADE_HOUR, "10:30", journal.ask_open_trade_hour),
         (journal.OPEN_TRADE_HOUR, "الان", journal.ask_open_trade_hour),
         (journal.OPEN_RISK, "1%", journal.ask_open_risk),
+        (journal.OPEN_MARGIN, "250", journal.ask_open_margin),
+        (journal.OPEN_MARGIN, "🧮 محاسبه خودکار", journal.ask_open_margin),
         (journal.OPEN_ENTRY, "2000", journal.ask_open_entry),
         (journal.OPEN_TAKE_PROFIT, "2100", journal.ask_open_take_profit),
         (journal.OPEN_STOP_LOSS, "1950", journal.ask_open_stop_loss),

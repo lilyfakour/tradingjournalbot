@@ -64,6 +64,7 @@ BOT_COMMANDS = [
     BotCommand("opens", "🟢 معاملات باز — دیدن و بستن معامله‌های جاری"),
     BotCommand("recent", "🕘 معاملات اخیر — هر معامله یک دکمه، جزئیات کامل و حذف"),
     BotCommand("stats", "📊 آمار — فیلتر بازه و نماد (دکمه‌های داخل پیام)"),
+    BotCommand("settings", "⚙️ تنظیمات — بودجهٔ حساب (USD)"),
     BotCommand("export", "📥 دانلود همه معاملات به‌صورت اکسل"),
     BotCommand("delete", "🗑 حذف یک معامله با شماره"),
     BotCommand("cancel", "✖️ لغو ثبت جاری"),
@@ -100,6 +101,9 @@ def main() -> None:
     app.add_handler(journal.build_stats_callbacks())
     app.add_handler(journal.build_recent_callbacks())
     app.add_handler(journal.build_open_callbacks())
+    for handler in journal.build_settings_handlers():
+        app.add_handler(handler)
+    app.add_handler(CommandHandler("settings", journal.show_settings))
     app.add_handler(CommandHandler("recent", journal.recent))
     app.add_handler(CommandHandler("opens", journal.open_trades))
     app.add_handler(CommandHandler("export", journal.export_trades))

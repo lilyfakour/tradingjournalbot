@@ -58,7 +58,18 @@ CREATE TABLE IF NOT EXISTS open_trades (
     created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_open_trades_date ON open_trades (trade_date);
+CREATE TABLE IF NOT EXISTS app_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
 """
+
+# Columns added to open_trades after its first release; init_db() ALTERs older
+# databases so they gain the new columns without touching existing rows.
+_OPEN_NEW_COLUMNS = {
+    # Margin in USD recorded in the open questionnaire (budget feature).
+    "margin": "REAL",
+}
 
 # Columns added after the first release; init_db() ALTERs older databases so
 # they gain the new columns without touching existing rows.
@@ -160,9 +171,60 @@ def init_db() -> None:
             if name not in existing:
                 conn.execute(f"ALTER TABLE trades ADD COLUMN {name} {decl}")
         _relax_trades(conn)
+        # open_trades gained columns after its first release too (the budget
+        # feature adds `margin`); ALTER older databases the same way.
+        open_existing = {
+            row["name"] for row in conn.execute("PRAGMA table_info(open_trades)")
+        }
+        for name, decl in _OPEN_NEW_COLUMNS.items():
+            if name not in open_existing:
+                conn.execute(f"ALTER TABLE open_trades ADD COLUMN {name} {decl}")
         conn.commit()
     finally:
         conn.close()
+
+
+def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    """Return a value from the app_settings table (or default)."""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row is not None else default
+    finally:
+        conn.close()
+
+
+def set_setting(key: str, value: Optional[str]) -> None:
+    """Store (or, with None, delete) a value in the app_settings table."""
+    conn = _connect()
+    try:
+        if value is None:
+            conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
+        else:
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES (?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_budget() -> Optional[float]:
+    """The user's total budget in USD, or None when not configured."""
+    raw = get_setting("budget")
+    try:
+        return float(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+
+
+def set_budget(value: Optional[float]) -> None:
+    """Store (or, with None, clear) the user's budget in USD."""
+    set_setting("budget", f"{value:.2f}" if value is not None else None)
 
 
 def add_trade(
@@ -322,16 +384,21 @@ def add_open_trade(
     entry_price: float,
     take_profit: Optional[float],
     stop_loss: Optional[float],
+    margin: Optional[float] = None,
 ) -> int:
-    """Insert an open (running) trade and return its id."""
+    """Insert an open (running) trade and return its id.
+
+    margin is the USD amount the trader commits (budget feature); when known,
+    the close flow computes P&L and ROI from it.
+    """
     conn = _connect()
     try:
         cursor = conn.execute(
             "INSERT INTO open_trades"
             " (symbol, direction, market, timeframe, reason, screenshot,"
             "  trade_date, entry_time, risk_percent, entry_price,"
-            "  take_profit, stop_loss)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  take_profit, stop_loss, margin)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 symbol,
                 direction,
@@ -345,6 +412,7 @@ def add_open_trade(
                 entry_price,
                 take_profit,
                 stop_loss,
+                margin,
             ),
         )
         conn.commit()
@@ -413,6 +481,18 @@ def close_open_trade(
         ).fetchone()
         if row is None:
             return None
+        # When the open questionnaire recorded a margin (budget feature), the
+        # close can compute real P&L and ROI; margin-less closes keep NULL.
+        margin = row["margin"]
+        pnl = roi = None
+        if margin:
+            move = (
+                (exit_price - row["entry_price"])
+                if row["direction"] == "long"
+                else (row["entry_price"] - exit_price)
+            )
+            pnl = round(move / row["entry_price"] * margin, 2)
+            roi = round(pnl / margin * 100.0, 2)
         cursor = conn.execute(
             "INSERT INTO trades"
             " (symbol, direction, timeframe, entry_price, exit_price, size,"
@@ -428,9 +508,9 @@ def close_open_trade(
                 row["timeframe"],
                 row["entry_price"],
                 exit_price,
-                None,  # size — unknown (no margin question)
-                None,  # pnl  — unknown (no margin to compute it from)
-                None,  # roi
+                margin,  # the committed margin doubles as the position size
+                pnl,
+                roi,
                 trade_date,
                 notes,  # the exit reason lives in `notes`
                 mood,

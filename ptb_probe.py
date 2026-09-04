@@ -158,6 +158,40 @@ async def main():
     assert "دلیل ورود" in detail and "دلیل خروج" in detail, detail
     print("PASS  recent detail of the two-phase trade renders (NULL-safe)")
 
+    # 6) budget feature: an open trade WITH a margin closed through the real
+    #    conversation stores real P&L/ROI (margin × price-move), not NULL.
+    oid2 = db.add_open_trade(
+        symbol="ETHUSD", direction="short", market="crypto", timeframe="15m",
+        reason="probe", screenshot=None, trade_date="2026-09-04",
+        entry_time="11:00", risk_percent=2.0, entry_price=3000.0,
+        take_profit=2900.0, stop_loss=3100.0, margin=50.0,
+    )
+    upd6 = tap(stub, user, chat, f"opn:c:{oid2}", 20)
+    r6 = cconv.check_update(upd6)
+    assert r6, "🏁 tap for the margin trade did not match"
+    ctx6 = app.context_types.context.from_update(upd6, app)
+    await ctx6.refresh_data()
+    await cconv.handle_update(upd6, app, r6, ctx6)
+    assert ctx6.user_data.get("open_margin") == 50.0, ctx6.user_data
+    assert await step("✅ Win (TP)", 21) == journal.CLOSE_DATE
+    assert await step("2026-09-04", 22) == journal.CLOSE_HOUR
+    assert await step("الان", 23) == journal.CLOSE_PHOTOS
+    assert await step("⏭ بدون اسکرین‌شات", 24) == journal.CLOSE_REASON
+    assert await step("TP tapped", 25) == journal.CLOSE_MOOD
+    assert await step("آرام", 26) == journal.CLOSE_CONFIRM
+    assert await step("✅ ثبت", 27) is None
+    closed2 = db.get_recent(1)[0]
+    # short 3000 -> 2900 with 50 margin: (3000-2900)/3000*50 = 1.67 USD,
+    # ROI from the rounded pnl: 1.67/50*100 = 3.34 %
+    assert closed2["pnl"] == 1.67 and closed2["roi"] == 3.34, dict(closed2)
+    assert closed2["size"] == 50.0, dict(closed2)
+    print("PASS  margin-aware close stores real P&L/ROI (1.67 $ / 3.34 %)")
+
+    detail2 = journal._recent_detail_text(closed2)
+    assert "مارجین: 50" in detail2, detail2
+    assert "+$1.67" in detail2 and "+3.34%" in detail2, detail2
+    print("PASS  detail card shows the real margin and P&L")
+
     print("ALL PROBES PASSED")
 
 

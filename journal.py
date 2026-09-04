@@ -84,11 +84,12 @@ logger = logging.getLogger(__name__)
     OPEN_TRADE_DATE,
     OPEN_TRADE_HOUR,
     OPEN_RISK,
+    OPEN_MARGIN,
     OPEN_ENTRY,
     OPEN_TAKE_PROFIT,
     OPEN_STOP_LOSS,
     OPEN_CONFIRM,
-) = range(100, 113)
+) = range(100, 114)
 
 # States of the close-an-open-trade questionnaire (started from the 🏁 button
 # on an open trade's detail card — the open trade id travels in user_data).
@@ -112,9 +113,13 @@ _CANCEL_RE = re.compile(
 # be typed as answers (notes, symbols, ...); case-insensitive, and both the
 # Persian and the original English words route.
 _NEW_TRADE_RE = re.compile(
-    r"^\s*📈\s*(?:بستن\s*معامله|close\s*trade|new\s*trade|معامله\s*جدید)\s*$",
+    r"^\s*📈\s*"
+    r"(?:بستن\s*معامله|ثبت\s*معامله\s*بسته|close\s*trade|new\s*trade|معامله\s*جدید)"
+    r"\s*$",
     re.IGNORECASE,
 )
+# ⚙️ تنظیمات — the settings panel (budget lives there).
+_SETTINGS_RE = re.compile(r"^\s*⚙️\s*(?:settings|تنظیمات)\s*$", re.IGNORECASE)
 _STATS_RE = re.compile(r"^\s*📊\s*(?:stats|آمار)\s*$", re.IGNORECASE)
 _RECENT_RE = re.compile(r"^\s*🕘\s*(?:recent|معاملات\s*اخیر|اخیر)\s*$", re.IGNORECASE)
 _OPEN_RE = re.compile(r"^\s*🟢\s*(?:open\s*trades|معاملات\s*باز|باز)\s*$", re.IGNORECASE)
@@ -126,9 +131,11 @@ _EXPORT_RE = re.compile(r"^\s*📥\s*(?:export|اکسل)\s*$", re.IGNORECASE)
 _MENU_HOME_RE = re.compile(r"^\s*🏠\s*(?:menu|منو)\s*$", re.IGNORECASE)
 _MENU_HELP_RE = re.compile(r"^\s*❓\s*(?:help|راهنما)\s*$", re.IGNORECASE)
 _MENU_RE = re.compile(
-    r"^\s*(?:📈\s*(?:بستن\s*معامله|close\s*trade|new\s*trade|معامله\s*جدید)"
+    r"^\s*(?:📈\s*"
+    r"(?:بستن\s*معامله|ثبت\s*معامله\s*بسته|close\s*trade|new\s*trade|معامله\s*جدید)"
     r"|🟢\s*(?:ثبت\s*معامله\s*باز|open\s*trades|معاملات\s*باز|باز)"
     r"|📊\s*(?:stats|آمار)"
+    r"|⚙️\s*(?:settings|تنظیمات)"
     r"|🕘\s*(?:recent|معاملات\s*اخیر|اخیر)"
     r"|📥\s*(?:export|اکسل)"
     r"|🏠\s*(?:menu|منو)|❓\s*(?:help|راهنما))\s*$",
@@ -279,11 +286,26 @@ _RISK_KEYBOARD = _rk(
         _CANCEL_ROW,
     ]
 )
+# The margin question (budget feature): a 🧮 button auto-calculates the
+# margin from the configured budget and the risk % entered a step earlier.
+MARGIN_AUTO_BTN = "🧮 محاسبه خودکار"
+MARGIN_AUTO_FIX_BTN = "✅ پیشنهاد ربات"
+MARGIN_KEEP_BTN = "✍️ عدد خودم"
+_OPEN_MARGIN_KEYBOARD = _rk([[MARGIN_AUTO_BTN], _CANCEL_ROW])
+_MARGIN_CONFLICT_KEYBOARD = _rk(
+    [[MARGIN_AUTO_FIX_BTN, MARGIN_KEEP_BTN], _CANCEL_ROW]
+)
 _DATE_KEYBOARD = _rk([["📅 امروز"], _CANCEL_ROW])
 _STATUS_KEYBOARD = _rk(
     [["✅ Win (TP)", "❌ Loss (SL)"], ["➖ BE", "✏️ Manual"], _CANCEL_ROW]
 )
 _OPEN_CONFIRM_KEYBOARD = _rk([["✅ ثبت", "❌ ثبت نشود"], _CANCEL_ROW])
+_SETTINGS_KEYBOARD = _rk(
+    [
+        ["💰 بودجه"],
+        ["🏠 منو"],
+    ]
+)
 _HOUR_KEYBOARD = _rk(
     [
         ["00", "03", "06", "09"],
@@ -364,6 +386,7 @@ MENU_TEXT = (
     "🟢 /opens — معاملات باز: دیدن، بستن یا حذف معامله‌های جاری\n"
     "🕘 /recent — معاملات اخیر، صفحه‌بندی‌شده (۱۰ تای آخر در هر صفحه؛ برای جزئیات روی معامله بزنید)\n"
     "📊 /stats — آمار عملکرد؛ فیلتر بازه زمانی و نماد با دکمه‌های داخل پیام\n"
+    "⚙️ /settings — تنظیمات؛ بودجهٔ حساب (USD) برای محاسبهٔ مارجین و ریسک\n"
     "📥 /export — دریافت همه معاملات به‌صورت فایل اکسل\n"
     "🗑 /delete <id> — حذف یک معامله\n"
     "✖️ /cancel — لغو ثبت جاری\n\n"
@@ -375,13 +398,14 @@ MENU_TEXT = (
 # The persistent main-menu bar. Every flow ends by re-sending it so the
 # buttons never disappear (one-time question keyboards vanish after a tap).
 # 🟢 ثبت معامله باز starts the open-trade questionnaire straight away;
-# 🟢 معاملات باز opens the panel where running positions are closed/deleted.
+# 🟢 معاملات باز opens the panel where running positions are closed/deleted;
+# 📈 ثبت معامله بسته logs a trade that has already been exited (/trade).
 _MENU_KEYBOARD = _rk(
     [
-        ["📈 بستن معامله", "🟢 ثبت معامله باز"],
+        ["📈 ثبت معامله بسته", "🟢 ثبت معامله باز"],
         ["🟢 معاملات باز", "📊 آمار"],
         ["🕘 معاملات اخیر", "📥 اکسل"],
-        ["🏠 منو"],
+        ["⚙️ تنظیمات", "🏠 منو"],
     ],
     one_time=False,
 )
@@ -412,6 +436,7 @@ def build_menu_handlers() -> list[MessageHandler]:
         # questionnaire — adding happens through the panel's ➕ button).
         MessageHandler(filters.Regex(_OPEN_RE), open_trades),
         MessageHandler(filters.Regex(_EXPORT_RE), export_trades),
+        MessageHandler(filters.Regex(_SETTINGS_RE), show_settings),
         MessageHandler(filters.Regex(_MENU_HELP_RE), show_menu),
         MessageHandler(filters.Regex(_MENU_HOME_RE), show_menu),
     ]
@@ -432,6 +457,100 @@ async def export_trades(
             reply_markup=_MENU_KEYBOARD,
         )
     path.unlink(missing_ok=True)  # sent; don't leave copies on disk
+
+
+# --------------------------------------------------------------------------
+# Settings (⚙️ تنظیمات / /settings) — currently the account budget in USD.
+# The budget feeds the open questionnaire's auto-margin calculation.
+# --------------------------------------------------------------------------
+_BUDGET_RE = re.compile(r"^\s*💰\s*(?:budget|بودجه)\s*$", re.IGNORECASE)
+_SET_BUDGET_RE = re.compile(
+    r"^\s*(?:⚙️\s*)?budget\s*(?::|=\s*|\s)\s*(\d+(?:\.\d+)?)\s*(?:usd|دلار)?\s*$",
+    re.IGNORECASE,
+)
+
+
+async def show_settings(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Send the settings panel (⚙️ تنظیمات button, /settings)."""
+    budget = db.get_budget()
+    if budget:
+        body = (
+            f"• 💰 بودجهٔ حساب: <b>{_fmt_num(budget)} $</b>\n"
+            "\n"
+            "این عدد برای دکمهٔ 🧮 محاسبهٔ خودکار در مرحلهٔ مارجینِ "
+            "«ثبت معامله باز» استفاده می‌شود:\n"
+            "مارجین = بودجه × درصد ریسک ÷ ۱۰۰"
+        )
+    else:
+        body = (
+            "• 💰 بودجهٔ حساب: <b>—</b> (هنوز تنظیم نشده)\n"
+            "\n"
+            "برای استفاده از دکمهٔ 🧮 محاسبهٔ خودکار مارجین، اول بودجه را "
+            "وارد کنید."
+        )
+    await update.effective_chat.send_message(
+        "⚙️ <b>تنظیمات</b>\n\n" + body,
+        reply_markup=_SETTINGS_KEYBOARD,
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def settings_budget(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """💰 بودجه tapped (or /settings budget ...) — prompt for the number."""
+    budget = db.get_budget()
+    current = f"{_fmt_num(budget)} $" if budget else "—"
+    # Arm the free-number listener: the next bare number becomes the budget.
+    context.user_data["_budget_prompt"] = True
+    await update.effective_chat.send_message(
+        f"💰 بودجهٔ فعلی: <b>{current}</b>\n\n"
+        "عدد بودجه را به دلار بفرستید (مثلاً 500 یا 1250.50) "
+        "یا «حذف» برای پاک کردن:",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def settings_budget_value(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Store the budget typed after the 💰 prompt (or via /settings budget N)."""
+    raw = (update.message.text or "").strip()
+    m = _SET_BUDGET_RE.match(raw)
+    if not m and not context.user_data.get("_budget_prompt"):
+        # A bare number outside the budget prompt is ignored — storing a
+        # budget from it would be a surprising side effect.
+        return
+    if raw.lower() in ("حذف", "remove", "clear", "هیچ", "-"):
+        context.user_data.pop("_budget_prompt", None)
+        db.set_budget(None)
+        await update.message.reply_text(
+            "💰 بودجه پاک شد.", reply_markup=_SETTINGS_KEYBOARD
+        )
+        return
+    number = _parse_positive(m.group(1)) if m else _parse_positive(raw)
+    if number is None:
+        await update.message.reply_text(
+            "عدد نامعتبر — مثلاً 500 یا 1250.50 بفرستید (دلار):"
+        )
+        return
+    context.user_data.pop("_budget_prompt", None)
+    db.set_budget(number)
+    logger.info("Budget set to %.2f USD", number)
+    await update.message.reply_text(
+        f"✅ بودجهٔ حساب: {_fmt_num(number)} $ — ثبت شد.",
+        reply_markup=_SETTINGS_KEYBOARD,
+    )
+
+
+def build_settings_handlers() -> list[MessageHandler]:
+    """Handlers for the settings menu (⚙️ panel, 💰 budget, typed value)."""
+    return [
+        MessageHandler(filters.Regex(_BUDGET_RE), settings_budget),
+        MessageHandler(filters.Regex(_SET_BUDGET_RE), settings_budget_value),
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -2207,6 +2326,10 @@ async def on_open_callback(
         context.user_data.clear()
         context.user_data["open_id"] = open_id
         context.user_data["open_symbol"] = row["symbol"]
+        # Margin snapshot (budget feature) — drives the P&L preview/summary.
+        context.user_data["open_margin"] = row["margin"]
+        context.user_data["open_entry_price"] = row["entry_price"]
+        context.user_data["open_direction"] = row["direction"]
         await query.answer()
         await update.effective_chat.send_message(
             f"بستن معامله #{open_id} {_ESC(row['symbol'])} — نتیجه؟",
@@ -2460,7 +2583,7 @@ async def ask_open_risk(
     raw = (update.message.text or "").strip()
     if raw.lower() in _SKIP_RISK_TOKENS:
         context.user_data.pop("risk_percent", None)
-        return await _prompt_open_entry(update)
+        return await _prompt_open_margin(update)
     number = _parse_percent(raw)
     if number is None:
         await update.message.reply_text(
@@ -2468,6 +2591,98 @@ async def ask_open_risk(
         )
         return OPEN_RISK
     context.user_data["risk_percent"] = number
+    return await _prompt_open_margin(update)
+
+
+# A manual margin that differs from the auto-calculated one by more than this
+# share (of the auto value) is flagged as a significant mismatch.
+_MARGIN_TOLERANCE = 0.10  # 10 %
+
+
+def _auto_margin(data: dict) -> Optional[float]:
+    """Margin implied by budget × risk% (None when inputs are missing)."""
+    budget = db.get_budget()
+    risk = data.get("risk_percent")
+    if not budget or not risk:
+        return None
+    return round(budget * risk / 100.0, 2)
+
+
+def _margins_conflict(user_margin: float, auto_margin_value: float) -> bool:
+    """True when the typed margin is significantly off the risk-implied one."""
+    if auto_margin_value <= 0:
+        return False
+    return abs(user_margin - auto_margin_value) / auto_margin_value > _MARGIN_TOLERANCE
+
+
+async def _prompt_open_margin(update: Update) -> int:
+    await update.effective_chat.send_message(
+        "💰 Margin — چند دلار به این معامله اختصاص می‌دی؟ (فقط USD، مثل 250)\n"
+        "یا 🧮 را بزن تا از روی بودجه و درصد ریسک حساب شود:",
+        reply_markup=_OPEN_MARGIN_KEYBOARD,
+    )
+    return OPEN_MARGIN
+
+
+async def ask_open_margin(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Store the margin USD; flag big mismatches against budget × risk%.
+
+    🧮 stores the auto value directly; a manual value that differs from the
+    auto one by more than 10 % gets a notice and a one-tap switch (the
+    resolving buttons are answered in this same state, before any parsing).
+    """
+    raw = (update.message.text or "").strip()
+
+    # --- resolving a flagged mismatch (⚠️ notice is on screen) ---------------
+    pending = context.user_data.get("_margin_conflict_user")
+    if pending is not None and raw in (MARGIN_AUTO_FIX_BTN, "auto", "پیشنهاد"):
+        context.user_data.pop("_margin_conflict_user", None)
+        context.user_data["margin"] = _auto_margin(context.user_data)
+        return await _prompt_open_entry(update)
+    if pending is not None and raw in (MARGIN_KEEP_BTN, "mine", "خودم"):
+        context.user_data.pop("_margin_conflict_user", None)
+        context.user_data["margin"] = pending
+        return await _prompt_open_entry(update)
+
+    # --- fresh answer: 🧮 auto, a typed USD number, or an invalid one --------
+    if raw == MARGIN_AUTO_BTN:
+        auto = _auto_margin(context.user_data)
+        if auto is None:
+            await update.message.reply_text(
+                "برای محاسبهٔ خودکار، بودجه (⚙️ تنظیمات) و درصد ریسک لازم است. "
+                "عدد مارجین را دستی بفرستید:",
+                reply_markup=_OPEN_MARGIN_KEYBOARD,
+            )
+            return OPEN_MARGIN
+        context.user_data.pop("_margin_conflict_user", None)
+        context.user_data["margin"] = auto
+        return await _prompt_open_entry(update)
+    number = _parse_positive(raw)
+    if number is None:
+        await update.message.reply_text(
+            "مارجین نامعتبر — یک عدد مثبت به دلار بفرستید (مثل 250) "
+            "یا 🧮 را بزن:"
+        )
+        return OPEN_MARGIN
+    auto = _auto_margin(context.user_data)
+    if auto is not None and _margins_conflict(number, auto):
+        # Significant difference — notice the user and offer the switch.
+        context.user_data["_margin_conflict_user"] = number
+        await update.message.reply_text(
+            "⚠️ این عدد با ریسک انتخابی‌ات نمی‌خواند:\n"
+            f"• مارجین پیشنهادی ({_fmt_num(context.user_data.get('risk_percent'))}%"
+            f" از بودجهٔ {_fmt_num(db.get_budget())} $): "
+            f"<b>{_fmt_num(auto)} $</b>\n"
+            f"• عدد تو: <b>{_fmt_num(number)} $</b>\n\n"
+            "کدام ثبت شود؟",
+            reply_markup=_MARGIN_CONFLICT_KEYBOARD,
+            parse_mode=ParseMode.HTML,
+        )
+        return OPEN_MARGIN
+    context.user_data.pop("_margin_conflict_user", None)
+    context.user_data["margin"] = number
     return await _prompt_open_entry(update)
 
 
@@ -2550,7 +2765,12 @@ def _open_summary(data: dict) -> str:
         "◾ <i>ورود</i>\n"
         f"• Date      {when or '-'}\n"
         f"• Risk      {(_fmt_num(risk) + '%') if risk else '-'}\n"
-        f"• Entry     {_fmt_num(data['entry_price'])}\n"
+        + (
+            f"• Margin    {_fmt_num(data['margin'])} $\n"
+            if data.get("margin")
+            else ""
+        )
+        + f"• Entry     {_fmt_num(data['entry_price'])}\n"
         f"• TP / SL   {_fmt_num(data['take_profit'])}"
         f" / {_fmt_num(data['stop_loss'])}\n"
         "\n"
@@ -2598,6 +2818,7 @@ async def save_open_trade(
             entry_price=data["entry_price"],
             take_profit=data.get("take_profit"),
             stop_loss=data.get("stop_loss"),
+            margin=data.get("margin"),
         )
         logger.info("Saved open trade #%s %s", open_id, data["symbol"])
         symbol = _ESC(data["symbol"])
@@ -2669,6 +2890,10 @@ async def _close_begin(
     context.user_data.clear()
     context.user_data["open_id"] = open_id
     context.user_data["open_symbol"] = row["symbol"]
+    # Margin snapshot (budget feature) — drives the P&L preview/summary.
+    context.user_data["open_margin"] = row["margin"]
+    context.user_data["open_entry_price"] = row["entry_price"]
+    context.user_data["open_direction"] = row["direction"]
     await update.effective_chat.send_message(
         f"بستن معامله #{open_id} {_ESC(row['symbol'])} — نتیجه؟",
         reply_markup=_STATUS_KEYBOARD,
@@ -2900,6 +3125,25 @@ def _close_summary(data: dict) -> str:
     shots = len((data.get("exit_photos") or "").splitlines())
     reason = _ESC(data["notes"]) if data.get("notes") else ""
     mood = data.get("mood")
+    # Margin/P&L preview (budget feature): when the open questionnaire
+    # recorded a margin, the close computes real P&L and ROI.
+    margin = data.get("open_margin")
+    entry_price = data.get("open_entry_price")
+    direction = data.get("open_direction")
+    pnl_line = ""
+    if margin and entry_price and direction in ("long", "short"):
+        exit_price = data.get("exit_price") or 0
+        move = (
+            (exit_price - entry_price)
+            if direction == "long"
+            else (entry_price - exit_price)
+        )
+        pnl = round(move / entry_price * margin, 2)
+        roi = round(pnl / margin * 100.0, 2)
+        pnl_line = (
+            f"• Margin    {_fmt_num(margin)} $\n"
+            f"• P&L       {_fmt_num(pnl)} $ ({_fmt_num(roi)}%)\n"
+        )
     return (
         "🔎 <b>تأیید بستن معامله</b>\n"
         "————————————————\n"
@@ -2912,6 +3156,7 @@ def _close_summary(data: dict) -> str:
         + (f"• Shots     {_fa_num(shots)}\n" if shots else "")
         + (f"• Reason    {reason}\n" if data.get("notes") else "")
         + (f"• Mood      {_MOOD_LABELS.get(mood, mood)}\n" if mood else "")
+        + (pnl_line + "\n" if pnl_line else "")
         + "\n"
         "معامله به تاریخچه معاملات بسته‌شده منتقل می‌شود.\n"
         "ثبت شود؟"
@@ -2945,6 +3190,21 @@ async def save_close_trade(
         data = dict(context.user_data)
         context.user_data.clear()
         open_id = data.pop("open_id")
+        # Real P&L/ROI when the open questionnaire recorded a margin
+        # (db.close_open_trade stores the same values from the DB row).
+        _close_pnl = _close_roi = None
+        _margin = data.get("open_margin")
+        if _margin and data.get("open_entry_price"):
+            _move = (
+                (data["exit_price"] - data["open_entry_price"])
+                if data.get("open_direction") == "long"
+                else (data["open_entry_price"] - data["exit_price"])
+            )
+            _close_pnl = round(_move / data["open_entry_price"] * _margin, 2)
+            # ROI derives from the ROUNDED pnl — the same convention the
+            # database uses, so the message never disagrees with the row.
+            _close_roi = round(_close_pnl / _margin * 100.0, 2)
+        data["_close_pnl"], data["_close_roi"] = _close_pnl, _close_roi
         new_id = db.close_open_trade(
             open_id,
             hit=data["hit"],
@@ -2977,7 +3237,13 @@ async def save_close_trade(
             f"• 📅 {data['trade_date']}"
             + (f" {data['exit_time']}" if data.get("exit_time") else "")
             + "\n"
-            "\n"
+            + (
+                f"• 💵 P&L: {_fmt_num(data['_close_pnl'])} $"
+                f" ({_fmt_num(data['_close_roi'])}%)\n"
+                if data.get("_close_pnl") is not None
+                else ""
+            )
+            + "\n"
             "در 🕘 معاملات اخیر و 📊 آمار قابل مشاهده است."
         )
         try:
@@ -3033,6 +3299,7 @@ def build_open_conversation() -> ConversationHandler:
             OPEN_TRADE_DATE: [MessageHandler(_ANSWER, ask_open_trade_date)],
             OPEN_TRADE_HOUR: [MessageHandler(_ANSWER, ask_open_trade_hour)],
             OPEN_RISK: [MessageHandler(_ANSWER, ask_open_risk)],
+            OPEN_MARGIN: [MessageHandler(_ANSWER, ask_open_margin)],
             OPEN_ENTRY: [MessageHandler(_ANSWER, ask_open_entry)],
             OPEN_TAKE_PROFIT: [MessageHandler(_ANSWER, ask_open_take_profit)],
             OPEN_STOP_LOSS: [MessageHandler(_ANSWER, ask_open_stop_loss)],
