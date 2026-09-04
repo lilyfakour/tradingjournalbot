@@ -117,6 +117,40 @@ async def main():
     assert any("نتیجه" in t for t in stub.sent), stub.sent
     print("PASS  tap opn:c:<id> -> close flow started (state CLOSE_STATUS)")
 
+    # 4) full close chain through the REAL conversation — regression for the
+    #    mood bug (ask_close_reason used to return the /trade MOOD state,
+    #    which left the close conversation unroutable).
+    async def step(text, oid):
+        m = Message(
+            message_id=oid, date=datetime.now(), chat=chat, from_user=user,
+            text=text,
+        )
+        m.set_bot(stub)
+        u = Update(update_id=oid, message=m)
+        u.set_bot(stub)
+        r = cconv.check_update(u)
+        assert r, f"no route for {text!r} at state {cconv._conversations.get((user.id, user.id))}"
+        cx = app.context_types.context.from_update(u, app)
+        await cx.refresh_data()
+        await cconv.handle_update(u, app, r, cx)
+        return cconv._conversations.get((user.id, user.id))
+
+    assert await step("✅ Win (TP)", 11) == journal.CLOSE_DATE
+    assert await step("2026-09-04", 12) == journal.CLOSE_HOUR
+    assert await step("الان", 13) == journal.CLOSE_PHOTOS
+    assert await step("⏭ بدون اسکرین‌شات", 14) == journal.CLOSE_REASON
+    state_after_reason = await step("TP tapped, momentum gone", 15)
+    assert state_after_reason == journal.CLOSE_MOOD, state_after_reason
+    print("PASS  reason -> CLOSE_MOOD through the real conversation (mood bug fixed)")
+    state_after_mood = await step("آرام", 16)
+    assert state_after_mood == journal.CLOSE_CONFIRM, state_after_mood
+    print("PASS  mood -> CLOSE_CONFIRM through the real conversation")
+    state_after_save = await step("✅ ثبت", 17)
+    assert state_after_save is None, state_after_save
+    closed = db.get_recent(1)[0]
+    assert closed["hit"] == "win" and closed["symbol"] == "BTCUSD", dict(closed)
+    print("PASS  confirm -> saved into history, conversation ended")
+
     print("ALL PROBES PASSED")
 
 

@@ -21,10 +21,11 @@ data and the spreadsheet column layout keep working.
 
 | Command | What it does |
 | --- | --- |
-| `/trade` | Guided entry: بازار (🪙 کریپتو / 💵 فارکس) -> symbol (recent / most-used as buttons) -> 📈 Long / 📉 Short -> Leverage (skippable) -> timeframe -> Entry -> 🎯 Take Profit -> 🛑 Stop Loss -> نتیجه (✅ Win / ❌ Loss / ➖ BE) -> 💰 Margin -> ⚠️ Risk % (skippable) -> date (📅 امروز) -> hour -> دلیل ورود -> Mood -> 📸 screenshot before -> 📸 screenshot after -> ✅ ذخیره / ❌ ثبت نشود. **P&L and ROI are calculated automatically** from margin × leverage × price move — the trader is never asked |
+| `/trade` | 📈 **ثبت معامله بسته‌شده** (after you have exited): بازار (🪙 کریپتو / 💵 فارکس) -> symbol (recent / most-used as buttons) -> 📈 Long / 📉 Short -> Leverage (skippable) -> timeframe -> Entry -> 🎯 Take Profit -> 🛑 Stop Loss -> نتیجه (✅ Win / ❌ Loss / ➖ BE) -> 💰 Margin -> ⚠️ Risk % (skippable) -> date (📅 امروز) -> hour (**🕐 الان** fills the current time) -> دلیل ورود -> Mood -> 📸 screenshot before -> 📸 screenshot after -> ✅ ذخیره / ❌ ثبت نشود. **P&L and ROI are calculated automatically** from margin × leverage × price move — the trader is never asked |
 | `/recent` | Paginated **inline panel** — **one button per trade** (result emoji + id + pair + P&L, 📷 if screenshots) with ◀️/▶️ paging, an All/1W/1M range filter, and a 🏠 Home button. Tapping a trade **sends a separate, airy detail message** (all fields with bullets, emoji labels and blank lines) carrying 📷 عکس چارت (only when the trade has screenshots — re-sends the before/after photos) + 🗑 Delete + ❌ Close; deleting confirms on the detail and refreshes the panel |
-| `/open` | 🟢 **Open trades panel** — one button per running position (entry price + 📷 mark) with ◀️/▶️ paging, **➕ ثبت معامله باز** to start the questionnaire, and 🏠 Home. Tapping a trade sends its detail card; with nothing open it shows the empty panel with the same ➕ button |
-| `/close <id>` | 🏁 Close an open trade (same flow as the 🏁 button on its detail card): status (✅ Win/TP · ❌ Loss/SL · ➖ BE · ✏️ Manual exit) → exit date → exit time → exit price (**auto-filled** for TP/SL/BE) → up to **4 exit screenshots** → دلیل خروج → Mood → confirm; the trade then moves into the normal history, `/recent` and `/stats` |
+| `/open` | 🟢 **ثبت معامله باز جدید** — a dedicated button on the main menu (📈 بستن معامله · **🟢 ثبت معامله باز**) starts the open-trade questionnaire straight away: بازار → symbol → Long/Short → timeframe → دلیل ورود → 📸 entry screenshot (optional) → entry date → entry hour (**🕐 الان** fills the current time) → Risk → Entry → 🎯 TP → 🛑 SL → confirm. Saved to «معاملات باز», **not** the history |
+| `/opens` | 🟢 **Open trades panel** — one button per running position (entry price + 📷 mark) with ◀️/▶️ paging, **➕ ثبت معامله باز** to start the questionnaire, and 🏠 Home. Tapping a trade sends its detail card |
+| `/close <id>` | 🏁 Close an open trade (same flow as the 🏁 button on its detail card): status (✅ Win/TP · ❌ Loss/SL · ➖ BE · ✏️ Manual exit) → exit date → exit time (**🕐 الان** fills the current time) → exit price (**auto-filled** for TP/SL/BE) → up to **4 exit screenshots** → دلیل خروج → Mood → confirm; the trade then moves into the normal history, `/recent` and `/stats` |
 | `/stats` | Filterable performance panel with **inline buttons attached to the message** (period, symbol, reset, export); `/stats BTCUSD 1w` style arguments still work |
 | `/delete <id>` | Delete a trade, e.g. `/delete 12` |
 | `/export` | Download all trades as an `.xlsx` spreadsheet |
@@ -71,10 +72,11 @@ prices, margin, custom date, notes).
   every command with a short emoji explanation. It is registered
   automatically when the bot starts (`set_my_commands`).
 - `/start`, `/help` or the 🏠 منو button send the **main-menu keyboard** —
-  persistent buttons under the input bar: 📈 معامله جدید · 🟢 معاملات باز /
-  📊 آمار · 🕘 معاملات اخیر / 📥 اکسل · 🏠 منو. Tapping one runs the matching
-  command; 📈 معامله جدید and 🟢 معاملات باز safely restart their
-  questionnaires even mid-entry. The bar is
+  persistent buttons under the input bar: 📈 بستن معامله · **🟢 ثبت معامله باز** /
+  🟢 معاملات باز · 📊 آمار / 🕘 معاملات اخیر · 📥 اکسل / 🏠 منو. The closed-trade
+  button is labeled «بستن معامله» so it can never be confused with the open-trade
+  one; 📈 بستن معامله and 🟢 ثبت معامله باز safely restart their questionnaires
+  even mid-entry. The bar is
   re-sent after saving, discarding or cancelling an entry, so the buttons
   never disappear (no `/start` needed).
 
@@ -139,24 +141,28 @@ Override the folder with the `SCREENSHOT_DIR` environment variable.
 
 ## Open trades (two-phase journaling)
 
-The 🟢 معاملات باز button (or `/open`) opens a panel styled exactly like
+The 🟢 معاملات باز button (or `/open` / `/opens`) opens a panel styled exactly like
 `/recent`: one button per running position (entry price + 📷 mark), an
 **➕ ثبت معامله باز** button on top, ◀️/▶️ paging and 🏠 Home. Tapping a trade
 sends its detail card — entry, TP, SL, risk, date/time, entry reason and a
 📷 button for the entry chart — carrying **🏁 Close trade**, 🗑 حذف and
-❌ بستن.
+❌ بستن. For a straightforward start there is also a dedicated
+**🟢 ثبت معامله باز** button on the main menu that jumps straight into the
+questionnaire.
 
-- **Phase 1 — register:** tap 🟢 معاملات باز (or `/open`) and press
-  **➕ ثبت معامله باز** on the panel. The questionnaire asks بازار، نماد، جهت،
-  تایم‌فریم، دلیل ورود، 📸 اسکرین‌شات ورود (اختیاری)، تاریخ ورود، ساعت ورود،
-  ⚠️ Risk، Entry، 🎯 TP و 🛑 SL — in that order — then shows the confirmation
+- **Phase 1 — register:** tap **🟢 ثبت معامله باز** on the main menu (or ➕ on
+  the 🟢 panel, or `/open`). The questionnaire asks بازار، نماد، جهت،
+  تایم‌فریم، دلیل ورود، 📸 اسکرین‌شات ورود (اختیاری)، تاریخ ورود، ساعت ورود
+  (دکمه **🕐 الان** زمان همین حالا را ثبت می‌کند)، ⚠️ Risk، Entry، 🎯 TP و
+  🛑 SL — in that order — then shows the confirmation
   summary and saves the position to «معاملات باز».
 - **Phase 2 — close:** later, tap the trade in the 🟢 panel and press
   **🏁 Close trade** (or send `/close <id>`). The bot asks the status
   (✅ Win/TP · ❌ Loss/SL · ➖ BE · ✏️ Manual exit), the exit date and the exit
-  time as two separate questions, then the exit price — **auto-filled from
-  TP/SL/entry for the first three statuses** — up to **4 exit screenshots**
-  (one per message, skippable), the reason for exiting and the mood. After
+  time (دکمه **🕐 الان**) as two separate questions, then the exit price —
+  **auto-filled from TP/SL/entry for the first three statuses** — up to
+  **4 exit screenshots** (one per message, skippable), the reason for exiting
+  and the mood. After
   the confirmation the position leaves the open list and appears in
   `/recent`, `/stats` and the Excel export.
 

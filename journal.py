@@ -111,16 +111,25 @@ _CANCEL_RE = re.compile(
 # Main-menu button labels. The emoji stays required so plain words can still
 # be typed as answers (notes, symbols, ...); case-insensitive, and both the
 # Persian and the original English words route.
-_NEW_TRADE_RE = re.compile(r"^\s*📈\s*(?:new\s*trade|معامله\s*جدید)\s*$", re.IGNORECASE)
+_NEW_TRADE_RE = re.compile(
+    r"^\s*📈\s*(?:بستن\s*معامله|close\s*trade|new\s*trade|معامله\s*جدید)\s*$",
+    re.IGNORECASE,
+)
 _STATS_RE = re.compile(r"^\s*📊\s*(?:stats|آمار)\s*$", re.IGNORECASE)
 _RECENT_RE = re.compile(r"^\s*🕘\s*(?:recent|معاملات\s*اخیر|اخیر)\s*$", re.IGNORECASE)
 _OPEN_RE = re.compile(r"^\s*🟢\s*(?:open\s*trades|معاملات\s*باز|باز)\s*$", re.IGNORECASE)
+# 🟢 ثبت معامله باز — starts the open-trade questionnaire straight away.
+_OPEN_ADD_TEXT_RE = re.compile(
+    r"^\s*🟢\s*(?:ثبت\s*معامله\s*باز|add\s*open\s*trade)\s*$", re.IGNORECASE
+)
 _EXPORT_RE = re.compile(r"^\s*📥\s*(?:export|اکسل)\s*$", re.IGNORECASE)
 _MENU_HOME_RE = re.compile(r"^\s*🏠\s*(?:menu|منو)\s*$", re.IGNORECASE)
 _MENU_HELP_RE = re.compile(r"^\s*❓\s*(?:help|راهنما)\s*$", re.IGNORECASE)
 _MENU_RE = re.compile(
-    r"^\s*(?:📈\s*(?:new\s*trade|معامله\s*جدید)|📊\s*(?:stats|آمار)"
-    r"|🕘\s*(?:recent|معاملات\s*اخیر|اخیر)|🟢\s*(?:open\s*trades|معاملات\s*باز|باز)"
+    r"^\s*(?:📈\s*(?:بستن\s*معامله|close\s*trade|new\s*trade|معامله\s*جدید)"
+    r"|🟢\s*(?:ثبت\s*معامله\s*باز|open\s*trades|معاملات\s*باز|باز)"
+    r"|📊\s*(?:stats|آمار)"
+    r"|🕘\s*(?:recent|معاملات\s*اخیر|اخیر)"
     r"|📥\s*(?:export|اکسل)"
     r"|🏠\s*(?:menu|منو)|❓\s*(?:help|راهنما))\s*$",
     re.IGNORECASE,
@@ -276,7 +285,12 @@ _STATUS_KEYBOARD = _rk(
 )
 _OPEN_CONFIRM_KEYBOARD = _rk([["✅ ثبت", "❌ ثبت نشود"], _CANCEL_ROW])
 _HOUR_KEYBOARD = _rk(
-    [["00", "03", "06", "09"], ["12", "15", "18", "21"], ["⏭ رد کردن"], _CANCEL_ROW]
+    [
+        ["00", "03", "06", "09"],
+        ["12", "15", "18", "21"],
+        ["🕐 الان", "⏭ رد کردن"],
+        _CANCEL_ROW,
+    ]
 )
 
 # Predetermined moods: button label -> value stored in the database.
@@ -345,26 +359,29 @@ def _symbol_keyboard() -> Optional[ReplyKeyboardMarkup]:
 # --------------------------------------------------------------------------
 
 MENU_TEXT = (
-    "📈 /trade — ثبت معامله بسته‌شده\n"
-    "🟢 /open — ثبت معامله باز و بستن آن بعداً\n"
+    "📈 /trade — ثبت معاملهٔ بسته‌شده (بعد از خروج از معامله)\n"
+    "🟢 /open — ثبت معاملهٔ باز (معامله‌ای که همین الان در آن هستی)\n"
+    "🟢 /opens — معاملات باز: دیدن، بستن یا حذف معامله‌های جاری\n"
     "🕘 /recent — معاملات اخیر، صفحه‌بندی‌شده (۱۰ تای آخر در هر صفحه؛ برای جزئیات روی معامله بزنید)\n"
     "📊 /stats — آمار عملکرد؛ فیلتر بازه زمانی و نماد با دکمه‌های داخل پیام\n"
     "📥 /export — دریافت همه معاملات به‌صورت فایل اکسل\n"
     "🗑 /delete <id> — حذف یک معامله\n"
     "✖️ /cancel — لغو ثبت جاری\n\n"
-    "درون /trade هر انتخاب به‌صورت دکمه در پایین صفحه نمایش داده می‌شود؛ "
-    "هر جا لازم بود می‌توانید مقدار را تایپ کنید. در پایان هم می‌توانید "
-    "اسکرین‌شات قبل و بعد از معامله را ضمیمه کنید. برای شروع یکی از "
-    "دکمه‌های زیر را بزنید."
+    "هر انتخاب به‌صورت دکمه در پایین صفحه نمایش داده می‌شود؛ هر جا لازم بود "
+    "می‌توانید مقدار را تایپ کنید. در پایان هم می‌توانید اسکرین‌شات قبل و بعد "
+    "از معامله را ضمیمه کنید. برای شروع یکی از دکمه‌های زیر را بزنید."
 )
 
 # The persistent main-menu bar. Every flow ends by re-sending it so the
 # buttons never disappear (one-time question keyboards vanish after a tap).
+# 🟢 ثبت معامله باز starts the open-trade questionnaire straight away;
+# 🟢 معاملات باز opens the panel where running positions are closed/deleted.
 _MENU_KEYBOARD = _rk(
     [
-        ["📈 معامله جدید", "🟢 معاملات باز"],
-        ["📊 آمار", "🕘 معاملات اخیر"],
-        ["📥 اکسل", "🏠 منو"],
+        ["📈 بستن معامله", "🟢 ثبت معامله باز"],
+        ["🟢 معاملات باز", "📊 آمار"],
+        ["🕘 معاملات اخیر", "📥 اکسل"],
+        ["🏠 منو"],
     ],
     one_time=False,
 )
@@ -861,7 +878,7 @@ async def trade_start(
     _drop_screenshot(context)
     context.user_data.clear()
     await update.message.reply_text(
-        "معامله جدید — در کدام بازار معامله کردی؟\n"
+        "ثبت معاملهٔ بسته‌شده — در کدام بازار معامله کردی؟\n"
         "(برای انصراف /cancel را بفرستید)",
         reply_markup=_MARKET_KEYBOARD,
     )
@@ -1102,7 +1119,7 @@ async def ask_trade_date(
 async def _prompt_trade_hour(update: Update) -> int:
     await update.effective_chat.send_message(
         "ساعت بسته‌شدن (اختیاری):\n"
-        "HH:MM  (e.g. 14:30)",
+        "HH:MM  (e.g. 14:30) — یا «🕐 الان» برای همین حالا",
         reply_markup=_HOUR_KEYBOARD,
     )
     return TRADE_HOUR
@@ -2384,7 +2401,7 @@ async def ask_open_trade_date(
 
 async def _prompt_open_hour(update: Update) -> int:
     await update.effective_chat.send_message(
-        "ساعت ورود:\nHH:MM  (e.g. 14:30)",
+        "ساعت ورود:\nHH:MM  (e.g. 14:30) — یا «🕐 الان» برای همین حالا",
         reply_markup=_HOUR_KEYBOARD,
     )
     return OPEN_TRADE_HOUR
@@ -2687,7 +2704,7 @@ async def ask_close_date(
 
 async def _prompt_close_hour(update: Update) -> int:
     await update.effective_chat.send_message(
-        "ساعت بستن:\nHH:MM  (e.g. 14:30)",
+        "ساعت بستن:\nHH:MM  (e.g. 14:30) — یا «🕐 الان» برای همین حالا",
         reply_markup=_HOUR_KEYBOARD,
     )
     return CLOSE_HOUR
@@ -2817,6 +2834,14 @@ async def _prompt_close_reason(update: Update) -> int:
     return CLOSE_REASON
 
 
+async def _prompt_close_mood(update: Update) -> int:
+    await update.effective_chat.send_message(
+        "Mood — حال‌وهوای حین معامله (اختیاری):",
+        reply_markup=_MOOD_KEYBOARD,
+    )
+    return CLOSE_MOOD
+
+
 async def ask_close_reason(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
@@ -2824,7 +2849,7 @@ async def ask_close_reason(
     context.user_data["notes"] = (
         "" if raw.lower() in _SKIP_NOTES_TOKENS else raw
     )
-    return await _prompt_mood(update)
+    return await _prompt_close_mood(update)
 
 
 async def ask_close_mood(
@@ -2841,7 +2866,7 @@ async def ask_close_mood(
             "یکی از حال‌وهواهای زیر را انتخاب کنید، مثلاً «آرام» یا «فومو» "
             "بنویسید، یا رد کنید:"
         )
-        return MOOD
+        return CLOSE_MOOD
     return await _prompt_close_confirm(update, context)
 
 
@@ -2970,6 +2995,10 @@ def build_open_conversation() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[
             CallbackQueryHandler(open_trades_add_entry, pattern=_OPEN_ADD_RE),
+            # 🟢 ثبت معامله باز on the main menu — straightforward start.
+            MessageHandler(filters.Regex(_OPEN_ADD_TEXT_RE), open_trade_start),
+            # /open — same straightforward start (see /opens for the panel).
+            CommandHandler("open", open_trade_start),
         ],
         states={
             OPEN_MARKET: [MessageHandler(_ANSWER, ask_open_market)],

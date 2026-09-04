@@ -157,7 +157,8 @@ def _inline_flat(markup):
 
 def _home_labels():
     return [
-        "📈 معامله جدید",
+        "📈 بستن معامله",
+        "🟢 ثبت معامله باز",
         "🟢 معاملات باز",
         "📊 آمار",
         "🕘 معاملات اخیر",
@@ -1159,9 +1160,9 @@ async def main() -> int:
         upd.text("TP tapped, momentum gone"), cctx
     )
     check(
-        state == journal.MOOD
+        state == journal.CLOSE_MOOD
         and cctx.user_data["notes"] == "TP tapped, momentum gone",
-        "close: exit reason -> MOOD",
+        "close: exit reason -> CLOSE_MOOD (close-specific prompt, not /trade MOOD)",
     )
     state = await journal.ask_close_mood(upd.text("آرام"), cctx)
     check(
@@ -1176,6 +1177,11 @@ async def main() -> int:
         and "Shots" in csummary and "۲" in csummary
         and "Reason" in csummary and "Mood" in csummary and "آرام" in csummary,
         "close: confirmation shows status/exit/date/shots/reason/mood",
+    )
+    state = await journal.ask_close_mood(upd.text("خورشت قیمه"), cctx)
+    check(
+        state == journal.CLOSE_MOOD,
+        "close: invalid mood re-asks CLOSE_MOOD (stays routable)",
     )
     state = await journal.save_close_trade(upd.text("✅ ثبت"), cctx)
     check(
@@ -1780,7 +1786,10 @@ async def main() -> int:
     check(
         all(
             cmd in menu_text
-            for cmd in ("/trade", "/open", "/recent", "/stats", "/delete", "/cancel")
+            for cmd in (
+                "/trade", "/open", "/opens", "/recent",
+                "/stats", "/delete", "/cancel",
+            )
         ),
         "menu lists every command with an explanation",
     )
@@ -1825,8 +1834,12 @@ async def main() -> int:
             f"menu button '{label}' routes to {fn.__name__}",
         )
     check(
-        _menu_routes("📈 معامله جدید") == [],
-        "📈 معامله جدید is handled by the conversation, not a standalone handler",
+        _menu_routes("📈 بستن معامله") == [],
+        "📈 بستن معامله is handled by the conversation, not a standalone handler",
+    )
+    check(
+        _menu_routes("🟢 ثبت معامله باز") == [],
+        "🟢 ثبت معامله باز is handled by the conversation, not a standalone handler",
     )
 
     for label in ("hello", "new trade", "stats", "📈", "📊 stats now", "✖️", "📥"):
@@ -1907,6 +1920,16 @@ async def main() -> int:
         getattr(handler, "callback", None) is journal.open_trades_add_entry,
         "➕ panel button enters the open conversation (entry point)",
     )
+    handler = _open_entry(_text_update("🟢 ثبت معامله باز"))
+    check(
+        getattr(handler, "callback", None) is journal.open_trade_start,
+        "🟢 ثبت معامله باز menu button starts the open questionnaire directly",
+    )
+    handler = _open_entry(_text_update("/open"))
+    check(
+        getattr(handler, "callback", None) is journal.open_trade_start,
+        "/open starts the open questionnaire (/opens is the panel)",
+    )
     check(
         _open_entry(_cb_update("opn:noop")) is None,
         "other opn taps don't start the conversation",
@@ -1937,6 +1960,7 @@ async def main() -> int:
         (journal.OPEN_SCREENSHOT, "-", journal.ask_open_screenshot_text),
         (journal.OPEN_TRADE_DATE, "2026-03-01", journal.ask_open_trade_date),
         (journal.OPEN_TRADE_HOUR, "10:30", journal.ask_open_trade_hour),
+        (journal.OPEN_TRADE_HOUR, "الان", journal.ask_open_trade_hour),
         (journal.OPEN_RISK, "1%", journal.ask_open_risk),
         (journal.OPEN_ENTRY, "2000", journal.ask_open_entry),
         (journal.OPEN_TAKE_PROFIT, "2100", journal.ask_open_take_profit),
@@ -1980,6 +2004,7 @@ async def main() -> int:
         (journal.CLOSE_STATUS, "✅ Win (TP)", journal.ask_close_status),
         (journal.CLOSE_DATE, "2026-03-02", journal.ask_close_date),
         (journal.CLOSE_HOUR, "15:45", journal.ask_close_hour),
+        (journal.CLOSE_HOUR, "الان", journal.ask_close_hour),
         (journal.CLOSE_PRICE, "58500", journal.ask_close_price),
         (journal.CLOSE_PHOTOS, "-", journal.ask_close_photos_text),
         (journal.CLOSE_REASON, "target", journal.ask_close_reason),
