@@ -78,6 +78,7 @@ logger = logging.getLogger(__name__)
     OPEN_MARKET,
     OPEN_SYMBOL,
     OPEN_DIRECTION,
+    OPEN_LEVERAGE,
     OPEN_TIMEFRAME,
     OPEN_REASON,
     OPEN_SCREENSHOT,
@@ -89,7 +90,7 @@ logger = logging.getLogger(__name__)
     OPEN_TAKE_PROFIT,
     OPEN_STOP_LOSS,
     OPEN_CONFIRM,
-) = range(100, 114)
+) = range(100, 115)
 
 # States of the close-an-open-trade questionnaire (started from the 🏁 button
 # on an open trade's detail card — the open trade id travels in user_data).
@@ -2138,7 +2139,11 @@ def _open_detail_text(row) -> str:
         "🪙 کریپتو" if (row["market"] or "crypto") == "crypto" else "💵 فارکس"
     )
     tf = row["timeframe"] or "—"
+    lev = f"{_fmt_num(row['leverage'])}x" if row["leverage"] else "1x"
     risk = f"{_fmt_num(row['risk_percent'])}%" if row["risk_percent"] else "—"
+    margin = (
+        f"{_fmt_num(row['margin'])} $" if row["margin"] else "—"
+    )
     tp = _fmt_num(row["take_profit"]) if row["take_profit"] else "—"
     sl = _fmt_num(row["stop_loss"]) if row["stop_loss"] else "—"
     when = row["trade_date"]
@@ -2147,13 +2152,14 @@ def _open_detail_text(row) -> str:
     reason = _ESC(row["reason"]) if row["reason"] else "—"
     return (
         f"🟢 معامله باز #{row['id']} — <b>{_ESC(row['symbol'])}</b>\n"
-        f"{side_icon} {side}  •  {market_fa}  •  ⏱ {tf}\n"
+        f"{side_icon} {side}  •  {market_fa}  •  ⏱ {tf}  •  ⚡ {lev}\n"
         "\n"
         f"• Entry: <code>{_fmt_num(row['entry_price'])}</code>\n"
         f"• 🎯 TP: <code>{tp}</code>\n"
         f"• 🛑 SL: <code>{sl}</code>\n"
         "\n"
         f"• Risk: {risk}\n"
+        f"• 💰 Margin: {margin}\n"
         f"• 📅 Date: {_ESC(when)}\n"
         f"• 💭 Reason: {reason}\n"
         "\n"
@@ -2361,6 +2367,7 @@ async def on_open_callback(
         context.user_data["open_margin"] = row["margin"]
         context.user_data["open_entry_price"] = row["entry_price"]
         context.user_data["open_direction"] = row["direction"]
+        context.user_data["open_leverage"] = row["leverage"]
         await query.answer()
         await update.effective_chat.send_message(
             f"بستن معامله #{open_id} {_ESC(row['symbol'])} — نتیجه؟",
@@ -2472,6 +2479,43 @@ async def ask_open_direction(
             reply_markup=_DIR_KEYBOARD,
         )
         return OPEN_DIRECTION
+    return await _prompt_open_leverage(update)
+
+
+async def _prompt_open_leverage(update: Update) -> int:
+    await update.effective_chat.send_message(
+        "⚡ اهرم (Leverage) — چند برابر؟",
+        reply_markup=_LEV_KEYBOARD,
+    )
+    return OPEN_LEVERAGE
+
+
+async def ask_open_leverage(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Same parsing as /trade's leverage: ×N, xN, N, or ⏭ (no leverage = 1x)."""
+    raw = (update.message.text or "").strip()
+    if raw.lower() in _SKIP_LEV_TOKENS:
+        context.user_data.pop("leverage", None)  # skipped → defaults to 1x
+        return await _prompt_open_timeframe(update)
+    text = raw.lower().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
+    text = text.replace("×", "x").replace(" ", "")
+    if text.startswith("x"):
+        text = text[1:]
+    if text.endswith("x"):
+        text = text[:-1]
+    number = _parse_positive(text)
+    if number is None or number > 1000:
+        await update.message.reply_text(
+            "Leverage نامعتبر — عدد بفرستید (مثلاً 10 یا 10x) یا «⏭ بدون اهرم»:",
+            reply_markup=_LEV_KEYBOARD,
+        )
+        return OPEN_LEVERAGE
+    context.user_data["leverage"] = number
+    return await _prompt_open_timeframe(update)
+
+
+async def _prompt_open_timeframe(update: Update) -> int:
     await update.effective_chat.send_message(
         "تایم‌فریم (Timeframe):", reply_markup=_TF_KEYBOARD
     )
@@ -2776,6 +2820,7 @@ def _open_summary(data: dict) -> str:
     )
     symbol = _ESC(data["symbol"])
     risk = data.get("risk_percent")
+    lev = data.get("leverage")
     when = data.get("trade_date", "")
     if data.get("entry_time"):
         when += f" {data['entry_time']}"
@@ -2790,6 +2835,7 @@ def _open_summary(data: dict) -> str:
         f"• Symbol    <b>{symbol}</b>\n"
         f"• Side      {_DIR_LABEL.get(data['direction'], data['direction'])}\n"
         f"• TF        {data.get('timeframe') or '-'}\n"
+        f"• Lev       {_fmt_num(lev or 1)}x\n"
         + (f"• Reason    {reason}\n" if data.get("reason") else "")
         + (f"• Shot      {shot}\n" if shot else "")
         + "\n"
@@ -2850,6 +2896,7 @@ async def save_open_trade(
             take_profit=data.get("take_profit"),
             stop_loss=data.get("stop_loss"),
             margin=data.get("margin"),
+            leverage=data.get("leverage"),
         )
         logger.info("Saved open trade #%s %s", open_id, data["symbol"])
         symbol = _ESC(data["symbol"])
@@ -2862,8 +2909,14 @@ async def save_open_trade(
             f"• <b>{symbol}</b> · "
             f"{_DIR_LABEL.get(data['direction'], data['direction'])}"
             + (f" · {data.get('timeframe')}" if data.get("timeframe") else "")
+            + f" · ⚡ {_fmt_num(data.get('leverage') or 1)}x"
             + "\n"
-            f"• Entry: {_fmt_num(data['entry_price'])}\n"
+            + (
+                f"• 💰 Margin: {_fmt_num(data['margin'])} $\n"
+                if data.get("margin")
+                else ""
+            )
+            + f"• Entry: {_fmt_num(data['entry_price'])}\n"
             f"• TP / SL: {_fmt_num(data['take_profit'])}"
             f" / {_fmt_num(data['stop_loss'])}\n"
             f"• 📅 {when}\n"
@@ -2925,6 +2978,7 @@ async def _close_begin(
     context.user_data["open_margin"] = row["margin"]
     context.user_data["open_entry_price"] = row["entry_price"]
     context.user_data["open_direction"] = row["direction"]
+    context.user_data["open_leverage"] = row["leverage"]
     await update.effective_chat.send_message(
         f"بستن معامله #{open_id} {_ESC(row['symbol'])} — نتیجه؟",
         reply_markup=_STATUS_KEYBOARD,
@@ -3157,10 +3211,12 @@ def _close_summary(data: dict) -> str:
     reason = _ESC(data["notes"]) if data.get("notes") else ""
     mood = data.get("mood")
     # Margin/P&L preview (budget feature): when the open questionnaire
-    # recorded a margin, the close computes real P&L and ROI.
+    # recorded a margin, the close computes real P&L and ROI. Leverage
+    # multiplies the price move; a skipped question means 1x.
     margin = data.get("open_margin")
     entry_price = data.get("open_entry_price")
     direction = data.get("open_direction")
+    lev = data.get("open_leverage") or 1.0
     pnl_line = ""
     if margin and entry_price and direction in ("long", "short"):
         exit_price = data.get("exit_price") or 0
@@ -3169,12 +3225,15 @@ def _close_summary(data: dict) -> str:
             if direction == "long"
             else (entry_price - exit_price)
         )
-        pnl = round(move / entry_price * margin, 2)
+        pnl = round(move / entry_price * margin * lev, 2)
         roi = round(pnl / margin * 100.0, 2)
         pnl_line = (
             f"• Margin    {_fmt_num(margin)} $\n"
+            f"• Lev       {_fmt_num(lev)}x\n"
             f"• P&L       {_fmt_num(pnl)} $ ({_fmt_num(roi)}%)\n"
         )
+    elif lev != 1.0:
+        pnl_line = f"• Lev       {_fmt_num(lev)}x\n"
     return (
         "🔎 <b>تأیید بستن معامله</b>\n"
         "————————————————\n"
@@ -3223,19 +3282,24 @@ async def save_close_trade(
         open_id = data.pop("open_id")
         # Real P&L/ROI when the open questionnaire recorded a margin
         # (db.close_open_trade stores the same values from the DB row).
+        # Leverage multiplies the price move; skipped = 1x.
         _close_pnl = _close_roi = None
         _margin = data.get("open_margin")
+        _lev = data.get("open_leverage") or 1.0
         if _margin and data.get("open_entry_price"):
             _move = (
                 (data["exit_price"] - data["open_entry_price"])
                 if data.get("open_direction") == "long"
                 else (data["open_entry_price"] - data["exit_price"])
             )
-            _close_pnl = round(_move / data["open_entry_price"] * _margin, 2)
+            _close_pnl = round(
+                _move / data["open_entry_price"] * _margin * _lev, 2
+            )
             # ROI derives from the ROUNDED pnl — the same convention the
             # database uses, so the message never disagrees with the row.
             _close_roi = round(_close_pnl / _margin * 100.0, 2)
         data["_close_pnl"], data["_close_roi"] = _close_pnl, _close_roi
+        data["_close_lev"] = _lev
         new_id = db.close_open_trade(
             open_id,
             hit=data["hit"],
@@ -3264,7 +3328,8 @@ async def save_close_trade(
             "\n"
             f"• <b>{_ESC(data.get('open_symbol', ''))}</b>"
             f" · #{new_id}\n"
-            f"• {label} · Exit {_fmt_num(data['exit_price'])}\n"
+            f"• {label} · Exit {_fmt_num(data['exit_price'])}"
+            f" · ⚡ {_fmt_num(data.get('_close_lev', 1))}x\n"
             f"• 📅 {data['trade_date']}"
             + (f" {data['exit_time']}" if data.get("exit_time") else "")
             + "\n"
@@ -3319,6 +3384,7 @@ def build_open_conversation() -> ConversationHandler:
             OPEN_MARKET: [MessageHandler(_ANSWER, ask_open_market)],
             OPEN_SYMBOL: [MessageHandler(_ANSWER, ask_open_symbol)],
             OPEN_DIRECTION: [MessageHandler(_ANSWER, ask_open_direction)],
+            OPEN_LEVERAGE: [MessageHandler(_ANSWER, ask_open_leverage)],
             OPEN_TIMEFRAME: [MessageHandler(_ANSWER, ask_open_timeframe)],
             OPEN_REASON: [MessageHandler(_ANSWER, ask_open_reason)],
             OPEN_SCREENSHOT: [
@@ -3451,7 +3517,7 @@ def _recent_detail_text(row) -> str:
         "🪙 کریپتو" if (row["market"] or "crypto") == "crypto" else "💵 فارکس"
     )
     tf = row["timeframe"] or "—"
-    lev = f"{_fmt_num(row['leverage'])}x" if row["leverage"] else "—"
+    lev = f"{_fmt_num(row['leverage'])}x" if row["leverage"] else "1x"
     risk = f"{_fmt_num(row['risk_percent'])}%" if row["risk_percent"] else "—"
     entry = _fmt_num(row["entry_price"])
     exit_ = _fmt_num(row["exit_price"]) if row["exit_price"] else "—"

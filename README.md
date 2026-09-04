@@ -23,7 +23,7 @@ data and the spreadsheet column layout keep working.
 | --- | --- |
 | `/trade` | 📈 **ثبت معامله بسته‌شده** (after you have exited): بازار (🪙 کریپتو / 💵 فارکس) -> symbol (recent / most-used as buttons) -> 📈 Long / 📉 Short -> Leverage (skippable) -> timeframe -> Entry -> 🎯 Take Profit -> 🛑 Stop Loss -> نتیجه (✅ Win / ❌ Loss / ➖ BE) -> 💰 Margin -> ⚠️ Risk % (skippable) -> date (📅 امروز) -> hour (**🕐 الان** fills the current time) -> دلیل ورود -> Mood -> 📸 screenshot before -> 📸 screenshot after -> ✅ ذخیره / ❌ ثبت نشود. **P&L and ROI are calculated automatically** from margin × leverage × price move — the trader is never asked |
 | `/recent` | Paginated **inline panel** — **one button per trade** (result emoji + id + pair + P&L or —, 📷 if screenshots, 🔁 if it was a two-phase open→close trade) with ◀️/▶️ paging, an All/1W/1M range filter, and a 🏠 Home button. Tapping a trade **sends a separate, airy detail message** (all fields with bullets, emoji labels and blank lines) carrying 📷 عکس چارت (entry before/after shots) + 📸 عکس‌های خروج (the up-to-4 exit shots of two-phase trades) + 🗑 Delete + ❌ Close; deleting confirms on the detail and refreshes the panel |
-| `/open` | 🟢 **ثبت معامله باز جدید** — a dedicated button on the main menu (📈 ثبت معامله بسته · **🟢 ثبت معامله باز**) starts the open-trade questionnaire straight away: بازار → symbol → Long/Short → timeframe → دلیل ورود → 📸 entry screenshot (optional) → entry date → entry hour (**🕐 الان** fills the current time) → Risk → 💰 Margin (**🧮 محاسبه خودکار** = بودجه × ریسک٪؛ مقادیر دستی که با ریسک نخواند با ⚠️ علام می‌خورند) → Entry → 🎯 TP → 🛑 SL → confirm. Saved to «معاملات باز», **not** the history |
+| `/open` | 🟢 **ثبت معامله باز جدید** — a dedicated button on the main menu (📈 ثبت معامله بسته · **🟢 ثبت معامله باز**) starts the open-trade questionnaire straight away: بازار → symbol → Long/Short → ⚡ Leverage (skippable — skipped means **1x**) → timeframe → دلیل ورود → 📸 entry screenshot (optional) → entry date → entry hour (**🕐 الان** fills the current time) → Risk → 💰 Margin (**🧮 محاسبه خودکار** = بودجه × ریسک٪؛ مقادیر دستی که با ریسک نخواند با ⚠️ علام می‌خورند) → Entry → 🎯 TP → 🛑 SL → confirm. Saved to «معاملات باز», **not** the history |
 | `/opens` | 🟢 **Open trades panel** — one button per running position (entry price + 📷 mark) with ◀️/▶️ paging, **➕ ثبت معامله باز** to start the questionnaire, and 🏠 Home. Tapping a trade sends its detail card |
 | `/close <id>` | 🏁 Close an open trade (same flow as the 🏁 button on its detail card): status (✅ Win/TP · ❌ Loss/SL · ➖ BE · ✏️ Manual exit) → exit date → exit time (**🕐 الان** fills the current time) → exit price (**auto-filled** for TP/SL/BE) → up to **4 exit screenshots** → دلیل خروج → Mood → confirm; the trade then moves into the normal history, `/recent` and `/stats` |
 | `/stats` | Filterable performance panel with **inline buttons attached to the message** (period, symbol, reset, export); `/stats BTCUSD 1w` style arguments still work |
@@ -157,7 +157,9 @@ questionnaire.
   تایم‌فریم، دلیل ورود، 📸 اسکرین‌شات ورود (اختیاری)، تاریخ ورود، ساعت ورود
   (دکمه **🕐 الان** زمان همین حالا را ثبت می‌کند)، ⚠️ Risk، 💰 Margin، Entry،
   🎯 TP و 🛑 SL — in that order — then shows the confirmation
-  summary and saves the position to «معاملات باز».
+  summary and saves the position to «معاملات باز». The leverage question sits
+  right after the direction (same ×2…×125 keyboard as `/trade`); skipping it
+  means the trade runs at **1x**.
 - **Phase 2 — close:** later, tap the trade in the 🟢 panel and press
   **🏁 Close trade** (or send `/close <id>`). The bot asks the status
   (✅ Win/TP · ❌ Loss/SL · ➖ BE · ✏️ Manual exit), the exit date and the exit
@@ -179,10 +181,14 @@ Because older trades were closed without a margin question, P&L for margin-less
 closes is stored as *unknown* (NULL — never a fake 0): the stats panel still
 counts them as Win/Loss/BE from the status and the price direction, and
 `/recent` shows «—» instead of a fabricated amount. When a margin **is** known,
-the close stores the real `P&L = price-move ÷ entry × margin` and ROI
-(ROI from the rounded P&L — matching the database), previews them on the
+the close stores the real
+`P&L = price-move ÷ entry × margin × leverage` and ROI (ROI from the rounded
+P&L — matching the database; leverage comes from the questionnaire and a
+skipped question counts as 1x), previews them on the
 confirmation summary, and `/recent`, `/stats` and the Excel export show the
-actual dollar amounts. In `/recent` two-phase trades carry a 🔁
+actual dollar amounts. Leverage appears on every trade message — the open
+summary, the saved-trade message, the 🟢 detail card and the `/recent` detail
+card (shown as 1x when it was skipped). In `/recent` two-phase trades carry a 🔁
 mark, and their detail card shows both reasons (ورود/خروج), the entry and exit
 hours, the exit-photo count and — when exit shots exist — a
 📸 عکس‌های خروج button that re-sends them one by one. The stats panel renders

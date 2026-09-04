@@ -239,7 +239,7 @@ async def main() -> int:
         {
             "symbol", "direction", "market", "timeframe", "reason",
             "screenshot", "trade_date", "entry_time", "risk_percent",
-            "entry_price", "take_profit", "stop_loss",
+            "entry_price", "take_profit", "stop_loss", "margin", "leverage",
         }
         <= open_cols,
         "open_trades table has every open-questionnaire column",
@@ -733,8 +733,13 @@ async def main() -> int:
     )
     state = await journal.ask_open_direction(upd.text("📈 Long"), octx)
     check(
-        state == journal.OPEN_TIMEFRAME and octx.user_data["direction"] == "long",
-        "open: direction -> OPEN_TIMEFRAME",
+        state == journal.OPEN_LEVERAGE and octx.user_data["direction"] == "long",
+        "open: direction -> OPEN_LEVERAGE",
+    )
+    state = await journal.ask_open_leverage(upd.text("×20"), octx)
+    check(
+        state == journal.OPEN_TIMEFRAME and octx.user_data["leverage"] == 20,
+        "open: leverage ×20 -> OPEN_TIMEFRAME",
     )
     state = await journal.ask_open_timeframe(upd.text("1h"), octx)
     check(state == journal.OPEN_REASON, "open: timeframe -> OPEN_REASON (order)")
@@ -777,6 +782,7 @@ async def main() -> int:
         "Market" in summary and "🪙 کریپتو" in summary
         and "Symbol" in summary and "XAUUSD" in summary
         and "TF" in summary and "1h" in summary
+        and "Lev" in summary and "20x" in summary
         and "Reason" in summary and "broke range high" in summary
         and "Shot" in summary and "📷" in summary
         and "Date" in summary and "2026-03-01 10:30" in summary
@@ -804,8 +810,14 @@ async def main() -> int:
         and xau["screenshot"] == open_shot
         and xau["trade_date"] == "2026-03-01" and xau["entry_time"] == "10:30"
         and xau["risk_percent"] == 1 and xau["entry_price"] == 2000
+        and xau["leverage"] == 20
         and xau["take_profit"] == 2100 and xau["stop_loss"] == 1950,
         "open: every questionnaire answer stored",
+    )
+    check(
+        "⚡ 20x" in journal._open_detail_text(xau)
+        and "💰 Margin: —" in journal._open_detail_text(xau),
+        "open: detail card shows leverage and the unset margin",
     )
     check(
         db.count_trades() == closed_before,
@@ -904,6 +916,27 @@ async def main() -> int:
         "open: 🧮 without a budget explains what is missing",
     )
     db.set_budget(500.0)
+
+    # close math: a skipped leverage means 1x (no inflation of P&L/ROI)
+    oid_1x = db.add_open_trade(
+        symbol="BTCUSD", direction="long", market="crypto", timeframe="1h",
+        reason="", screenshot=None, trade_date="2026-03-02",
+        entry_time="", risk_percent=1.0, entry_price=50000.0,
+        take_profit=51000.0, stop_loss=49000.0, margin=100.0,
+    )
+    new_id_1x = db.close_open_trade(
+        oid_1x, hit="win", exit_price=51000.0, trade_date="2026-03-02",
+        exit_time="", notes="", mood="", exit_photos=None,
+        screenshot_after=None,
+    )
+    row_1x = db.get_trade(new_id_1x)
+    # long 50000 -> 51000, margin 100, leverage skipped (1x): +2.0 USD
+    check(
+        row_1x["pnl"] == 2.0 and row_1x["roi"] == 2.0
+        and row_1x["leverage"] is None,
+        "close: skipped leverage means 1x P&L (history keeps leverage NULL)",
+    )
+    db.delete_trade(new_id_1x)  # keep the suite's later aggregates intact
 
     # --- symbol suggestions: most used + recently traded ----------------------
     ctx5 = FakeContext()
@@ -2143,6 +2176,8 @@ async def main() -> int:
         (journal.OPEN_MARKET, "🪙 کریپتو", journal.ask_open_market),
         (journal.OPEN_SYMBOL, "XAUUSD", journal.ask_open_symbol),
         (journal.OPEN_DIRECTION, "📈 Long", journal.ask_open_direction),
+        (journal.OPEN_LEVERAGE, "×10", journal.ask_open_leverage),
+        (journal.OPEN_LEVERAGE, "⏭ بدون اهرم", journal.ask_open_leverage),
         (journal.OPEN_TIMEFRAME, "1h", journal.ask_open_timeframe),
         (journal.OPEN_REASON, "broke out", journal.ask_open_reason),
         (journal.OPEN_SCREENSHOT, "-", journal.ask_open_screenshot_text),

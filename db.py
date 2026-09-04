@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS app_settings (
 _OPEN_NEW_COLUMNS = {
     # Margin in USD recorded in the open questionnaire (budget feature).
     "margin": "REAL",
+    # Leverage of the open questionnaire (skipped = NULL = 1x on close).
+    "leverage": "REAL",
 }
 
 # Columns added after the first release; init_db() ALTERs older databases so
@@ -385,11 +387,13 @@ def add_open_trade(
     take_profit: Optional[float],
     stop_loss: Optional[float],
     margin: Optional[float] = None,
+    leverage: Optional[float] = None,
 ) -> int:
     """Insert an open (running) trade and return its id.
 
     margin is the USD amount the trader commits (budget feature); when known,
-    the close flow computes P&L and ROI from it.
+    the close flow computes P&L and ROI from it. leverage is the questionnaire's
+    leverage (skipped = NULL = 1x on close).
     """
     conn = _connect()
     try:
@@ -397,8 +401,8 @@ def add_open_trade(
             "INSERT INTO open_trades"
             " (symbol, direction, market, timeframe, reason, screenshot,"
             "  trade_date, entry_time, risk_percent, entry_price,"
-            "  take_profit, stop_loss, margin)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  take_profit, stop_loss, margin, leverage)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 symbol,
                 direction,
@@ -413,6 +417,7 @@ def add_open_trade(
                 take_profit,
                 stop_loss,
                 margin,
+                leverage,
             ),
         )
         conn.commit()
@@ -483,7 +488,9 @@ def close_open_trade(
             return None
         # When the open questionnaire recorded a margin (budget feature), the
         # close can compute real P&L and ROI; margin-less closes keep NULL.
+        # Leverage multiplies the price move; a skipped question means 1x.
         margin = row["margin"]
+        leverage = row["leverage"] or 1.0
         pnl = roi = None
         if margin:
             move = (
@@ -491,17 +498,17 @@ def close_open_trade(
                 if row["direction"] == "long"
                 else (row["entry_price"] - exit_price)
             )
-            pnl = round(move / row["entry_price"] * margin, 2)
+            pnl = round(move / row["entry_price"] * margin * leverage, 2)
             roi = round(pnl / margin * 100.0, 2)
         cursor = conn.execute(
             "INSERT INTO trades"
             " (symbol, direction, timeframe, entry_price, exit_price, size,"
             "  pnl, roi, trade_date, notes, mood, screenshot, market,"
-            "  risk_percent, take_profit, stop_loss, hit, screenshot_after,"
-            "  entry_time, exit_time, entry_reason, exit_reason, exit_photos,"
-            "  source)"
+            "  leverage, risk_percent, take_profit, stop_loss, hit,"
+            "  screenshot_after, entry_time, exit_time, entry_reason,"
+            "  exit_reason, exit_photos, source)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-            "         ?, ?, ?, ?, ?, ?)",
+            "         ?, ?, ?, ?, ?, ?, ?)",
             (
                 row["symbol"],
                 row["direction"],
@@ -516,6 +523,7 @@ def close_open_trade(
                 mood,
                 row["screenshot"],
                 row["market"],
+                row["leverage"],  # NULL (skipped) keeps the history neutral
                 row["risk_percent"],
                 row["take_profit"],
                 row["stop_loss"],
