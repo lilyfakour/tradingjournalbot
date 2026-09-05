@@ -229,6 +229,26 @@ hours, the exit-photo count and — when exit shots exist — a
 can never crash on them. The 🗑 button on an open trade's detail deletes it
 (and its screenshots) without ever touching the history.
 
+## Running the bot locally on Windows
+
+- Double-click **`bot.bat`** (or run
+  `powershell -NoProfile -ExecutionPolicy Bypass -File bot-manager.ps1`): a small
+  TUI shows the live status (RUNNING/STOPPED, PID, uptime, memory, last log line)
+  and offers **Start / Stop / Restart / Live log / Clear log / Quit** with
+  arrow keys + Enter (number keys `1-6`, Esc quits).
+- The bot starts as a **hidden detached process** — closing the manager window
+  (or the whole terminal) does **not** stop it. Stop it from the menu, or run
+  `bot-manager.ps1 -Stop`. Detection works via `bot.pid` **plus** a command-line
+  scan, so manually started `python bot.py` instances are found too. The start
+  watchdog watches the first seconds and prints the log tail plus likely causes
+  (missing token, another poller) if the bot dies right away.
+- **One poller per token**: only ONE bot instance may poll a token. Before
+  running locally, pause the Railway service (or any other deployment) —
+  otherwise the instances fight over `getUpdates` and the log fills with
+  `telegram.error.Conflict: terminated by other getUpdates request`.
+- Scripting switches: `-Status`, `-Start`, `-Stop`
+  (e.g. `powershell -File bot-manager.ps1 -Status`).
+
 ## Data
 
 - Trades are stored in `journal.db` (SQLite, WAL mode) next to `bot.py`.

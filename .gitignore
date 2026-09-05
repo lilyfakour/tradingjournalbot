@@ -20,3 +20,6 @@ exports/
 # Runtime logs
 bot.log
 bot.err.log
+
+# Local process manager
+bot.pid
