@@ -44,7 +44,7 @@ from telegram import (
     ReplyKeyboardRemove,
     Update,
 )
-from telegram.constants import ChatAction, ParseMode
+from telegram.constants import ChatAction, KeyboardButtonStyle, ParseMode
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
@@ -495,25 +495,54 @@ MENU_TEXT = (
 )
 
 # The main menu is a MESSAGE with inline buttons (no reply bar anymore).
+# Every button carries a Telegram button style (Bot API 10.0 / PTB 22.7+):
+# primary = blue pill, success = green pill — like the classic trading-app
+# menu. Old Telegram clients simply ignore the style and show plain buttons.
 _MENU_IK = InlineKeyboardMarkup(
     [
         [
             InlineKeyboardButton(
-                "📈 ثبت معامله بسته", callback_data="menu:trade"
+                "📈 ثبت معامله بسته",
+                callback_data="menu:trade",
+                style=KeyboardButtonStyle.PRIMARY,
             ),
             InlineKeyboardButton(
-                "🟢 ثبت معامله باز", callback_data="menu:open"
+                "🟢 ثبت معامله باز",
+                callback_data="menu:open",
+                style=KeyboardButtonStyle.SUCCESS,
             ),
         ],
         [
-            InlineKeyboardButton("🟢 معاملات باز", callback_data="menu:opens"),
-            InlineKeyboardButton("📊 آمار", callback_data="menu:stats"),
+            InlineKeyboardButton(
+                "🟢 معاملات باز",
+                callback_data="menu:opens",
+                style=KeyboardButtonStyle.SUCCESS,
+            ),
+            InlineKeyboardButton(
+                "📊 آمار",
+                callback_data="menu:stats",
+                style=KeyboardButtonStyle.PRIMARY,
+            ),
         ],
         [
-            InlineKeyboardButton("🕘 معاملات اخیر", callback_data="menu:recent"),
-            InlineKeyboardButton("📥 اکسل", callback_data="menu:export"),
+            InlineKeyboardButton(
+                "🕘 معاملات اخیر",
+                callback_data="menu:recent",
+                style=KeyboardButtonStyle.PRIMARY,
+            ),
+            InlineKeyboardButton(
+                "📥 اکسل",
+                callback_data="menu:export",
+                style=KeyboardButtonStyle.SUCCESS,
+            ),
         ],
-        [InlineKeyboardButton("⚙️ تنظیمات", callback_data="menu:settings")],
+        [
+            InlineKeyboardButton(
+                "⚙️ تنظیمات",
+                callback_data="menu:settings",
+                style=KeyboardButtonStyle.PRIMARY,
+            )
+        ],
     ]
 )
 

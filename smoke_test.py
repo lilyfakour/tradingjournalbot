@@ -2073,6 +2073,22 @@ async def main() -> int:
         menu_labels == _home_labels(),
         "main-menu buttons present",
     )
+    menu_styles = [
+        getattr(btn, "style", None)
+        for row in menu_kb.inline_keyboard
+        for btn in row
+    ]
+    expected_styles = [
+        getattr(btn, "style", None)
+        for row in journal._MENU_IK.inline_keyboard
+        for btn in row
+    ]
+    check(
+        menu_styles == expected_styles
+        and len(menu_styles) == 7
+        and all(s in ("primary", "success") for s in menu_styles),
+        "every main-menu button carries a blue/green Telegram button style",
+    )
 
     menu_handler = journal.build_menu_callbacks()
 
