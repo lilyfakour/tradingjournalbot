@@ -2086,8 +2086,8 @@ async def main() -> int:
     check(
         menu_styles == expected_styles
         and len(menu_styles) == 7
-        and all(s in ("primary", "success") for s in menu_styles),
-        "every main-menu button carries a blue/green Telegram button style",
+        and all(s in ("primary", "success", "danger") for s in menu_styles),
+        "every main-menu button carries a blue/green/red Telegram button style",
     )
 
     menu_handler = journal.build_menu_callbacks()

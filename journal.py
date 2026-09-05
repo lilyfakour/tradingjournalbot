@@ -496,8 +496,9 @@ MENU_TEXT = (
 
 # The main menu is a MESSAGE with inline buttons (no reply bar anymore).
 # Every button carries a Telegram button style (Bot API 10.0 / PTB 22.7+):
-# primary = blue pill, success = green pill — like the classic trading-app
-# menu. Old Telegram clients simply ignore the style and show plain buttons.
+# a stable two-column pattern — left column blue (primary), right column
+# green (success), ⚙️ settings red (danger). Old Telegram clients simply
+# ignore the style and show plain buttons.
 _MENU_IK = InlineKeyboardMarkup(
     [
         [
@@ -516,12 +517,12 @@ _MENU_IK = InlineKeyboardMarkup(
             InlineKeyboardButton(
                 "🟢 معاملات باز",
                 callback_data="menu:opens",
-                style=KeyboardButtonStyle.SUCCESS,
+                style=KeyboardButtonStyle.PRIMARY,
             ),
             InlineKeyboardButton(
                 "📊 آمار",
                 callback_data="menu:stats",
-                style=KeyboardButtonStyle.PRIMARY,
+                style=KeyboardButtonStyle.SUCCESS,
             ),
         ],
         [
@@ -540,7 +541,7 @@ _MENU_IK = InlineKeyboardMarkup(
             InlineKeyboardButton(
                 "⚙️ تنظیمات",
                 callback_data="menu:settings",
-                style=KeyboardButtonStyle.PRIMARY,
+                style=KeyboardButtonStyle.DANGER,
             )
         ],
     ]

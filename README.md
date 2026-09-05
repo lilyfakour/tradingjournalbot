@@ -92,10 +92,11 @@ skip shortcut). The old reply-keyboard bar under the input field is gone.
   secondary screens open on top of it, and 📈 / 🟢 safely restart their
   questionnaires even mid-entry.
   Every menu button also carries a **Telegram button style**
-  (`KeyboardButtonStyle`, Bot API 10.0 / PTB 22.7+): blue pills for
-  📈 ثبت معامله بسته · 📊 آمار · 🕘 معاملات اخیر · ⚙️ تنظیمات and green pills
-  for 🟢 ثبت معامله باز · 🟢 معاملات باز · 📥 اکسل — current Telegram apps draw
-  them as colored buttons, older clients just show them unstyled.
+  (`KeyboardButtonStyle`, Bot API 10.0 / PTB 22.7+): the **left column is
+  blue** (📈 ثبت معامله بسته · 🟢 معاملات باز · 🕘 معاملات اخیر), the
+  **right column is green** (🟢 ثبت معامله باز · 📊 آمار · 📥 اکسل) and
+  ⚙️ تنظیمات is **red** — current Telegram apps draw them as colored
+  buttons, older clients just show them unstyled.
 - The **first menu after (re)starting the bot** also removes the persistent
   reply-keyboard bar of the old UI — **silently**: one message with the
   `ReplyKeyboardRemove` flag is sent and instantly deleted, so the bar is
