@@ -12,9 +12,9 @@ straight to the main menu. A chart screenshot can be attached near the end of
 the questionnaire and is later reachable through the 📷 button on the trade's
 detail card in /recent.
 
-P&L is the trader's typed dollar result: the result question (✅ Win / ❌ Loss /
-➖ BE) only signs it. No leverage anywhere; Margin is optional (⏭ skip) and
-feeds ROI plus the live budget in ⚙️ تنظیمات.
+P&L and ROI are the trader's typed numbers: the result question (✅ Win /
+❌ Loss / ➖ BE) only signs them. Margin and leverage are optional (⏭ skip)
+info-only fields — the bot computes nothing.
 
 Open trades work in two phases: the 🟢 open-trades questionnaire (market,
 symbol, side, timeframe, reason, screenshot, date, time, risk, margin,
@@ -70,6 +70,7 @@ logger = logging.getLogger(__name__)
     STOP_LOSS,
     RESULT,
     PNL_AMOUNT,
+    PNL_ROI,
     MARGIN,
     RISK,
     TRADE_DATE,
@@ -79,7 +80,7 @@ logger = logging.getLogger(__name__)
     SCREENSHOT,
     SCREENSHOT_AFTER,
     CONFIRM,
-) = range(18)
+) = range(19)
 
 # States of the 🟢 open-trades questionnaire (starting at 100 to keep the two
 # conversations' state numbers disjoint).
@@ -94,17 +95,19 @@ logger = logging.getLogger(__name__)
     OPEN_TRADE_HOUR,
     OPEN_RISK,
     OPEN_MARGIN,
+    OPEN_LEVERAGE,
     OPEN_ENTRY,
     OPEN_TAKE_PROFIT,
     OPEN_STOP_LOSS,
     OPEN_CONFIRM,
-) = range(100, 114)
+) = range(100, 115)
 
 # States of the close-an-open-trade questionnaire (started from the 🏁 button
 # on an open trade's detail card — the open trade id travels in user_data).
 (
     CLOSE_STATUS,
     CLOSE_AMOUNT,
+    CLOSE_ROI,
     CLOSE_DATE,
     CLOSE_HOUR,
     CLOSE_PRICE,
@@ -112,7 +115,7 @@ logger = logging.getLogger(__name__)
     CLOSE_REASON,
     CLOSE_MOOD,
     CLOSE_CONFIRM,
-) = range(200, 209)
+) = range(200, 210)
 
 _TEXT = filters.TEXT & ~filters.COMMAND
 _CANCEL_RE = re.compile(
@@ -130,7 +133,6 @@ _MENU_RE = re.compile(
     r"|⚙️\s*(?:settings|تنظیمات)"
     r"|🕘\s*(?:recent|معاملات\s*اخیر|اخیر)"
     r"|📥\s*(?:export|اکسل)"
-    r"|🧮\s*محاسبه\s*خودکار"
     r"|🏠\s*(?:menu|منو|home|خانه)"
     r"|❓\s*(?:help|راهنما))\s*$",
     re.IGNORECASE,
@@ -470,8 +472,8 @@ def _build_keyboards() -> None:
     _CONFIRM_KEYBOARD = _ik([["✅ ذخیره", "❌ ثبت نشود"], _CANCEL_IK_ROW])
     _STATUS_KEYBOARD = _ik(
         [
-            ["✅ Win (TP)", "❌ Loss (SL)"],
-            ["➖ BE", "✏️ دستی"],
+            ["✅ Win", "❌ Loss"],
+            ["➖ BE"],
             _CANCEL_IK_ROW,
         ]
     )
@@ -576,6 +578,11 @@ _SKIP_RISK_TOKENS = _SKIP_TOKENS | {"بدون درصد", "⏭ بدون درصد"
 # The margin question is skippable (the trader may not want to record it).
 _SKIP_MARGIN_BTN = "⏭ رد کردن"
 _SKIP_MARGIN_TOKENS = _SKIP_TOKENS | {_SKIP_MARGIN_BTN}
+# Leverage (open questionnaire, بخش اول): typed like 10, 10x or ×10 — stored
+# as info-only; the bot never uses it in any calculation.
+_LEV_RE = re.compile(r"^\s*[×xX]?\s*(\d{1,3})(?:\.\d+)?\s*[xX×]?\s*$")
+_SKIP_LEVERAGE_BTN = "⏭ بدون اهرم"
+_LEVERAGE_SKIP_TOKENS = _SKIP_TOKENS | {_SKIP_LEVERAGE_BTN}
 _MARKET_CRYPTO_TOKENS = {
     "crypto",
     "کریپتو",
@@ -643,6 +650,10 @@ _STATUS_TOKENS.update(
         "✅ win (tp)": "win",
         "❌ loss (sl)": "loss",
         "✏️ manual": "manual",
+        # The plain inline-button labels (no TP/SL mention — it is just info).
+        "✅ win": "win",
+        "❌ loss": "loss",
+        "➖ be": "be",
     }
 )
 # Stored value -> detail-card emoji/label (manual uses ➖ in stats roll-ups).
@@ -652,7 +663,7 @@ _OPEN_EMOJI = {
     "be": "⚪",
     "manual": "✏️",
 }
-_OPEN_STATUS_LABELS = {"win": "TP hit (Win)", "loss": "SL hit (Loss)", "be": "Breakeven", "manual": "Manual exit"}
+_OPEN_STATUS_LABELS = {"win": "Win", "loss": "Loss", "be": "Breakeven", "manual": "Manual exit"}
 # Maximum number of exit screenshots per close (spec: 4).
 _MAX_EXIT_PHOTOS = 4
 
@@ -673,18 +684,14 @@ _MENU_KILLER = ReplyKeyboardRemove()
 
 
 _CANCEL_ROW = ["✖️ لغو"]
-_MARKET_KEYBOARD = _ik([["🪙 کریپتو", "💵 فارکس"], _CANCEL_IK_ROW])
+_MARKET_KEYBOARD = _ik([["🪙 Crypto", "💵 فارکس"], _CANCEL_IK_ROW])
 _RESULT_KEYBOARD = _ik([["✅ Win", "❌ Loss", "➖ BE"], _CANCEL_IK_ROW])
 _RISK_KEYBOARD = _ik([["0.5%", "1%", "2%"], ["3%", "5%", "10%"], ["⏭ بدون درصد"], _CANCEL_IK_ROW])
-# The margin question (budget feature): a 🧮 button auto-calculates the
-# margin from the configured budget and the risk % entered a step earlier.
-MARGIN_AUTO_BTN = "🧮 محاسبه خودکار"
-MARGIN_AUTO_FIX_BTN = "✅ پیشنهاد ربات"
-_SKIP_OPEN_MARGIN_ROW = [[_SKIP_MARGIN_BTN]]
+# The margin questions are info-only: type a USD amount or skip it — the bot
+# never calculates, suggests or warns about the margin.
 _OPEN_MARGIN_KEYBOARD = _ik(
-    [[MARGIN_AUTO_BTN], [_SKIP_MARGIN_BTN], _CANCEL_IK_ROW]
+    [[_SKIP_MARGIN_BTN], _CANCEL_IK_ROW]
 )
-_MARGIN_CONFLICT_KEYBOARD = _ik([[MARGIN_AUTO_FIX_BTN], _CANCEL_IK_ROW])
 
 
 def _symbol_keyboard() -> Optional[InlineKeyboardMarkup]:
@@ -836,7 +843,8 @@ async def export_trades(
 
 # --------------------------------------------------------------------------
 # Settings (⚙️ تنظیمات / /settings) — currently the account budget in USD.
-# The budget feeds the open questionnaire's auto-margin calculation.
+# The budget still moves by every closed trade's typed P&L (budget feature);
+# the margin auto-calculation is gone — margin is typed or skipped.
 # --------------------------------------------------------------------------
 _BUDGET_RE = re.compile(r"^\s*💰\s*(?:budget|بودجه)\s*$", re.IGNORECASE)
 _BUDGET_VALUE_RE = re.compile(
@@ -858,15 +866,14 @@ async def _send_settings_screen(
     if budget:
         body = (
             f"• 💰 بودجهٔ حساب: <b>{_fmt_num(budget)} $</b>\n\n"
-            "این عدد برای دکمهٔ 🧮 محاسبهٔ خودکار در مرحلهٔ مارجینِ "
-            "«ثبت معامله باز» استفاده می‌شود:\n"
-            "مارجین = بودجه × درصد ریسک ÷ ۱۰۰"
+            "با هر معاملهٔ بسته‌شده، بودجه به اندازهٔ سود یا ضرر ثبت‌شده "
+            "کم یا زیاد می‌شود."
         )
     else:
         body = (
             "• 💰 بودجهٔ حساب: <b>—</b> (هنوز تنظیم نشده)\n\n"
-            "برای استفاده از دکمهٔ 🧮 محاسبهٔ خودکار مارجین، اول بودجه را "
-            "وارد کنید."
+            "اگر بودجه را وارد کنید، با هر معاملهٔ بسته‌شده به اندازهٔ "
+            "سود یا ضرر جابه‌جا می‌شود."
         )
     await _show_screen(
         context,
@@ -1077,8 +1084,8 @@ def _signed_pnl(data: dict) -> float:
     """The signed P&L of a draft: ➖ for a loss, 0 for BE, ➕ for a win.
 
     The amount is the trader's own input (data["pnl_amount"]); the result
-    question only decides its sign. No margin/leverage math anywhere — what
-    the trader types is exactly what gets stored.
+    question only decides its sign. No math anywhere — what the trader types
+    is exactly what gets stored.
     """
     amount = data.get("pnl_amount") or 0.0
     hit = data.get("hit")
@@ -1089,11 +1096,24 @@ def _signed_pnl(data: dict) -> float:
     return abs(amount)
 
 
-def _roi_from_pnl(pnl: float, margin: Optional[float]) -> Optional[float]:
-    """ROI percent from the stored P&L and margin (None when margin-less)."""
-    if not margin:
+def _signed_roi(value: Optional[float], hit: Optional[str]) -> Optional[float]:
+    """The trader's typed ROI percent, signed by the result (None if skipped).
+
+    Shared by /trade (data["pnl_roi"]) and the close flow (data["close_roi"]):
+    the percent is only signed, never computed from anything.
+    """
+    if value is None:
         return None
-    return round(pnl / margin * 100.0, 2)
+    if hit == "be":
+        return 0.0
+    if hit in ("lose", "loss"):
+        return -abs(value)
+    return abs(value)
+
+
+def _close_roi_signed(data: dict) -> Optional[float]:
+    """The signed typed ROI of a close draft (0 for BE, None when skipped)."""
+    return _signed_roi(data.get("close_roi"), data.get("hit"))
 
 
 def _screenshot_path(name: str) -> Path:
@@ -1258,11 +1278,11 @@ def _result_emoji(hit: Optional[str]) -> str:
 def _summary(data: dict) -> str:
     """Render the airy confirmation summary for the current draft (HTML)."""
     pnl = _signed_pnl(data)
-    roi = _roi_from_pnl(pnl, data.get("size"))
     hit = data.get("hit") or ""
+    roi = _signed_roi(data.get("pnl_roi"), hit)
     emoji = _result_emoji(hit)
     market = data.get("market") or "crypto"
-    market_fa = "🪙 کریپتو" if market == "crypto" else "💵 فارکس"
+    market_fa = "🪙 Crypto" if market == "crypto" else "💵 فارکس"
     result = _RESULT_LABELS.get(hit, "-")
     risk = data.get("risk_percent")
     margin = data.get("size")
@@ -1337,7 +1357,7 @@ async def _save_and_reply(
     _reset_flow(context)
     await _drop_screen_message(context, update.effective_chat.id, "flow")
     pnl = _signed_pnl(data)
-    roi = _roi_from_pnl(pnl, data.get("size"))
+    roi = _signed_roi(data.get("pnl_roi"), data.get("hit"))
     trade_id = db.add_trade(
         symbol=data["symbol"],
         direction=data["direction"],
@@ -1423,8 +1443,8 @@ async def trade_start(
     await _q_send(
         update,
         context,
-        "ثبت معاملهٔ بسته‌شده — در کدام بازار معامله کردی؟",
-        _ik([["🪙 کریپتو", "💵 فارکس"], _CANCEL_IK_ROW]),
+        "ثبت معاملهٔ بسته‌شده — در کدام بازار معامله کردی؟ (🪙 Crypto / 💵 فارکس)",
+        _ik([["🪙 Crypto", "💵 فارکس"], _CANCEL_IK_ROW]),
     )
     return MARKET
 
@@ -1441,7 +1461,7 @@ async def ask_market(
         await _q_send(
             update,
             context,
-            "یکی از دو دکمه را بزنید: 🪙 کریپتو یا 💵 فارکس",
+            "یکی از دو دکمه را بزنید: 🪙 Crypto یا 💵 فارکس",
             reply_markup=_MARKET_KEYBOARD,
         )
         return MARKET
@@ -1586,6 +1606,36 @@ async def ask_pnl_amount(
         )
         return PNL_AMOUNT
     context.user_data["pnl_amount"] = number
+    return await _prompt_pnl_roi(update, context)
+
+
+async def _prompt_pnl_roi(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """The typed ROI percent (بخش دوم) — stored as-is, never computed."""
+    await _q_send(update, context,
+        "📊 مقدار سود یا ضرر به درصد چقدر بود؟ (مثلاً 2.5)\n"
+        f"{_SKIP_MARGIN_BTN} یعنی بدون درصد:",
+        reply_markup=_ik([[_SKIP_MARGIN_BTN], _CANCEL_IK_ROW]),
+    )
+    return PNL_ROI
+
+
+async def ask_pnl_roi(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Store the typed ROI percent; the result question only signs it."""
+    raw = (update.message.text or "").strip()
+    if raw in _SKIP_MARGIN_TOKENS:
+        context.user_data.pop("pnl_roi", None)
+        return await _prompt_margin(update, context)
+    number = _parse_percent(raw)
+    if number is None:
+        await update.message.reply_text(
+            "درصد نامعتبر — عددی بین 0 تا 100 بفرستید (مثلاً 2.5):"
+        )
+        return PNL_ROI
+    context.user_data["pnl_roi"] = number
     return await _prompt_margin(update, context)
 
 
@@ -1594,7 +1644,7 @@ async def ask_margin(
 ) -> int:
     raw = (update.message.text or "").strip()
     if raw in _SKIP_MARGIN_TOKENS:
-        # Skipped margin: the draft keeps no size and ROI stays unknown.
+        # Skipped margin: the draft keeps no size (nothing to compute).
         context.user_data.pop("size", None)
         return await _prompt_risk(update, context)
     number = _parse_positive(raw)
@@ -1604,7 +1654,7 @@ async def ask_margin(
             f"یا {_SKIP_MARGIN_BTN}:"
         )
         return MARGIN
-    context.user_data["size"] = number  # 'size' column stores the margin
+    context.user_data["size"] = number  # 'size' column stores the margin (info-only)
     return await _prompt_risk(update, context)
 
 
@@ -1887,6 +1937,10 @@ def build_conversation() -> ConversationHandler:
             PNL_AMOUNT: [
                 CallbackQueryHandler(_tap_step(ask_pnl_amount), pattern=_Q_CB_RE),
                 MessageHandler(_ANSWER, _msg_step(ask_pnl_amount)),
+            ],
+            PNL_ROI: [
+                CallbackQueryHandler(_tap_step(ask_pnl_roi), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_pnl_roi)),
             ],
             MARGIN: [
                 CallbackQueryHandler(_tap_step(ask_margin), pattern=_Q_CB_RE),
@@ -2570,7 +2624,7 @@ def _open_detail_text(row) -> str:
     side = _DIR_LABEL.get(row["direction"], row["direction"].upper())
     side_icon = "📈" if row["direction"] == "long" else "📉"
     market_fa = (
-        "🪙 کریپتو" if (row["market"] or "crypto") == "crypto" else "💵 فارکس"
+        "🪙 Crypto" if (row["market"] or "crypto") == "crypto" else "💵 فارکس"
     )
     tf = row["timeframe"] or "—"
     risk = f"{_fmt_num(row['risk_percent'])}%" if row["risk_percent"] else "—"
@@ -2593,7 +2647,8 @@ def _open_detail_text(row) -> str:
         "\n"
         f"• Risk: {risk}\n"
         f"• 💰 Margin: {margin}\n"
-        f"• 📅 Date: {_ESC(when)}\n"
+        + (f"• ⚡ اهرم: {_fmt_num(row['leverage'])}\n" if row["leverage"] else "")
+        + f"• 📅 Date: {_ESC(when)}\n"
         f"• 💭 Reason: {reason}\n"
         "\n"
         "<i>برای بستن این معامله، دکمه 🏁 را بزنید.</i>"
@@ -2857,7 +2912,7 @@ async def ask_open_market(
         await _q_send(
             update,
             context,
-            "یکی از دو دکمه را بزنید: 🪙 کریپتو یا 💵 فارکس",
+            "یکی از دو دکمه را بزنید: 🪙 Crypto یا 💵 فارکس",
             reply_markup=_MARKET_KEYBOARD,
         )
         return OPEN_MARKET
@@ -3042,7 +3097,7 @@ async def ask_open_trade_hour(
 
 async def _prompt_open_risk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await _q_send(update, context,
-        "⚠️ Risk — چند درصد از حساب؟ (مثلاً 1 یا 1%)",
+        "⚠️ Risk — درصد ریسک این معامله (فقط اطلاعات ثبت می‌شود؛ مثل 1 یا 1%)",
         reply_markup=_ik([["0.5%", "1%", "2%"], ["3%", "5%", "10%"], ["⏭ بدون درصد"], _CANCEL_IK_ROW]),
     )
     return OPEN_RISK
@@ -3054,7 +3109,7 @@ async def ask_open_risk(
     raw = (update.message.text or "").strip()
     if raw.lower() in _SKIP_RISK_TOKENS:
         context.user_data.pop("risk_percent", None)
-        return await _prompt_open_margin(update, context)
+        return await _prompt_open_leverage(update, context)
     number = _parse_percent(raw)
     if number is None:
         await update.message.reply_text(
@@ -3062,34 +3117,14 @@ async def ask_open_risk(
         )
         return OPEN_RISK
     context.user_data["risk_percent"] = number
-    return await _prompt_open_margin(update, context)
-
-
-# A manual margin that differs from the auto-calculated one by more than this
-# share (of the auto value) is flagged as a significant mismatch.
-_MARGIN_TOLERANCE = 0.10  # 10 %
-
-
-def _auto_margin(data: dict) -> Optional[float]:
-    """Margin implied by budget × risk% (None when inputs are missing)."""
-    budget = db.get_budget()
-    risk = data.get("risk_percent")
-    if not budget or not risk:
-        return None
-    return round(budget * risk / 100.0, 2)
-
-
-def _margins_conflict(user_margin: float, auto_margin_value: float) -> bool:
-    """True when the typed margin is significantly off the risk-implied one."""
-    if auto_margin_value <= 0:
-        return False
-    return abs(user_margin - auto_margin_value) / auto_margin_value > _MARGIN_TOLERANCE
+    return await _prompt_open_leverage(update, context)
 
 
 async def _prompt_open_margin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """💰 Margin — info-only; typed or skipped, never calculated."""
     await _q_send(update, context,
         "💰 Margin — چند دلار به این معامله اختصاص می‌دی؟ (فقط USD، مثل 250)\n"
-        "یا 🧮 را بزن تا از روی بودجه و درصد ریسک حساب شود؛ "
+        f"این عدد فقط ثبت می‌شود و هیچ محاسبه‌ای انجام نمی‌دهد؛ "
         f"{_SKIP_MARGIN_BTN} یعنی بدون مارجین:",
         reply_markup=_OPEN_MARGIN_KEYBOARD,
     )
@@ -3099,40 +3134,19 @@ async def _prompt_open_margin(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def ask_open_margin(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Store the margin USD; flag big mismatches against budget × risk%.
+    """Store the margin USD exactly as typed — no warnings, no suggestions.
 
-    🧮 stores the auto value directly; a manual value that differs from the
-    auto one by more than 10 % gets a notice and a one-tap switch (the
-    resolving buttons are answered in this same state, before any parsing).
-    ⏭ رد کردن leaves the margin empty.
+    Nothing is compared against the budget or the risk %; the number is
+    info-only. ⏭ رد کردن leaves the margin empty.
     """
     raw = (update.message.text or "").strip()
 
     # --- skip: no margin at all ------------------------------------------
     if raw in _SKIP_MARGIN_TOKENS:
         context.user_data.pop("margin", None)
-        return await _prompt_open_entry(update, context)
+        return await _prompt_open_leverage(update, context)
 
-    # --- resolving a flagged mismatch (⚠️ notice is on screen) ---------------
-    pending = context.user_data.get("_margin_conflict_user")
-    if pending is not None and raw in (MARGIN_AUTO_FIX_BTN, "auto", "پیشنهاد"):
-        context.user_data.pop("_margin_conflict_user", None)
-        context.user_data["margin"] = _auto_margin(context.user_data)
-        return await _prompt_open_entry(update, context)
-
-    # --- fresh answer: 🧮 auto, a typed USD number, or an invalid one --------
-    if raw == MARGIN_AUTO_BTN:
-        auto = _auto_margin(context.user_data)
-        if auto is None:
-            await update.message.reply_text(
-                "برای محاسبهٔ خودکار، بودجه (⚙️ تنظیمات) و درصد ریسک لازم است. "
-                f"عدد مارجین را دستی بفرستید یا {_SKIP_MARGIN_BTN}:",
-                reply_markup=_OPEN_MARGIN_KEYBOARD,
-            )
-            return OPEN_MARGIN
-        context.user_data.pop("_margin_conflict_user", None)
-        context.user_data["margin"] = auto
-        return await _prompt_open_entry(update, context)
+    # --- fresh answer: a typed USD number, or an invalid one --------------
     number = _parse_positive(raw)
     if number is None:
         await update.message.reply_text(
@@ -3140,23 +3154,38 @@ async def ask_open_margin(
             f"یا {_SKIP_MARGIN_BTN}:"
         )
         return OPEN_MARGIN
-    auto = _auto_margin(context.user_data)
-    if auto is not None and _margins_conflict(number, auto):
-        # Significant difference — notice the user and offer the switch.
-        context.user_data["_margin_conflict_user"] = number
-        await update.message.reply_text(
-            "⚠️ این عدد با ریسک انتخابی‌ات نمی‌خواند:\n"
-            f"• مارجین پیشنهادی ({_fmt_num(context.user_data.get('risk_percent'))}%"
-            f" از بودجهٔ {_fmt_num(db.get_budget())} $): "
-            f"<b>{_fmt_num(auto)} $</b>\n"
-            f"• عدد تو: <b>{_fmt_num(number)} $</b>\n\n"
-            "کدام ثبت شود؟",
-            reply_markup=_MARGIN_CONFLICT_KEYBOARD,
-            parse_mode=ParseMode.HTML,
-        )
-        return OPEN_MARGIN
-    context.user_data.pop("_margin_conflict_user", None)
     context.user_data["margin"] = number
+    return await _prompt_open_leverage(update, context)
+
+
+async def _prompt_open_leverage(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """اهرم — info-only (the layout's «اهرم»); never used in any math."""
+    await _q_send(update, context,
+        "⚡ اهرم (فقط اطلاعات — هیچ محاسبه‌ای انجام نمی‌شود):\n"
+        f"مثلاً 10 یا 10x؛ یا {_SKIP_LEVERAGE_BTN}:",
+        reply_markup=_ik([[_SKIP_LEVERAGE_BTN], _CANCEL_IK_ROW]),
+    )
+    return OPEN_LEVERAGE
+
+
+async def ask_open_leverage(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Store the leverage exactly as typed (info-only); skip leaves it NULL."""
+    raw = (update.message.text or "").strip()
+    if raw.lower() in _LEVERAGE_SKIP_TOKENS:
+        context.user_data.pop("leverage", None)
+        return await _prompt_open_entry(update, context)
+    match = _LEV_RE.match(raw)
+    if not match:
+        await update.message.reply_text(
+            "اهرم نامعتبر — عددی مثل 10 یا 10x بفرستید "
+            f"یا {_SKIP_LEVERAGE_BTN}:"
+        )
+        return OPEN_LEVERAGE
+    context.user_data["leverage"] = float(match.group(1))
     return await _prompt_open_entry(update, context)
 
 
@@ -3215,7 +3244,7 @@ async def ask_open_stop_loss(
 def _open_summary(data: dict) -> str:
     """Render the airy confirmation summary for the open-trade draft (HTML)."""
     market_fa = (
-        "🪙 کریپتو" if (data.get("market") or "crypto") == "crypto" else "💵 فارکس"
+        "🪙 Crypto" if (data.get("market") or "crypto") == "crypto" else "💵 فارکس"
     )
     symbol = _ESC(data["symbol"])
     risk = data.get("risk_percent")
@@ -3242,6 +3271,11 @@ def _open_summary(data: dict) -> str:
         + (
             f"• Margin    {_fmt_num(data['margin'])} $\n"
             if data.get("margin")
+            else ""
+        )
+        + (
+            f"• Leverage  ×{_fmt_num(data['leverage'])}\n"
+            if data.get("leverage")
             else ""
         )
         + f"• Entry     {_fmt_num(data['entry_price'])}\n"
@@ -3294,6 +3328,7 @@ async def save_open_trade(
             take_profit=data.get("take_profit"),
             stop_loss=data.get("stop_loss"),
             margin=data.get("margin"),
+            leverage=data.get("leverage"),
         )
         logger.info("Saved open trade #%s %s", open_id, data["symbol"])
         symbol = _ESC(data["symbol"])
@@ -3310,6 +3345,11 @@ async def save_open_trade(
             + (
                 f"• 💰 Margin: {_fmt_num(data['margin'])} $\n"
                 if data.get("margin")
+                else ""
+            )
+            + (
+                f"• ⚡ اهرم: ×{_fmt_num(data['leverage'])}\n"
+                if data.get("leverage")
                 else ""
             )
             + f"• Entry: {_fmt_num(data['entry_price'])}\n"
@@ -3388,13 +3428,14 @@ async def ask_close_status(
     status = _STATUS_TOKENS.get(raw)
     if status is None:
         await update.message.reply_text(
-            "نتیجه را انتخاب کنید: ✅ Win (TP) / ❌ Loss (SL) / ➖ BE / ✏️ دستی"
+            "نتیجه را انتخاب کنید: ✅ Win / ❌ Loss / ➖ BE / ✏️ دستی"
         )
         return CLOSE_STATUS
     context.user_data["hit"] = status
     if status == "be":
         # Breakeven: nothing gained, nothing lost — skip the amount.
         context.user_data["close_pnl"] = 0.0
+        context.user_data["close_roi"] = 0.0
         await _q_send(update, context,
             "تاریخ بستن معامله:\nYYYY-MM-DD  (e.g. 2026-02-09)",
             reply_markup=_DATE_KEYBOARD,
@@ -3428,6 +3469,40 @@ async def ask_close_amount(
         )
         return CLOSE_AMOUNT
     context.user_data["close_pnl"] = number
+    return await _prompt_close_roi(update, context)
+
+
+async def _prompt_close_roi(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """The typed ROI percent of the close (بخش دوم) — stored as-is."""
+    await _q_send(update, context,
+        "📊 مقدار سود یا ضرر به درصد چقدر بود؟ (مثلاً 2.5)\n"
+        f"{_SKIP_MARGIN_BTN} یعنی بدون درصد:",
+        reply_markup=_ik([[_SKIP_MARGIN_BTN], _CANCEL_IK_ROW]),
+    )
+    return CLOSE_ROI
+
+
+async def ask_close_roi(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Store the typed ROI percent; the result question only signs it."""
+    raw = (update.message.text or "").strip()
+    if raw in _SKIP_MARGIN_TOKENS:
+        context.user_data.pop("close_roi", None)
+        await _q_send(update, context,
+            "تاریخ بستن معامله:\nYYYY-MM-DD  (e.g. 2026-02-09)",
+            reply_markup=_DATE_KEYBOARD,
+        )
+        return CLOSE_DATE
+    number = _parse_percent(raw)
+    if number is None:
+        await update.message.reply_text(
+            "درصد نامعتبر — عددی بین 0 تا 100 بفرستید (مثلاً 2.5):"
+        )
+        return CLOSE_ROI
+    context.user_data["close_roi"] = number
     await _q_send(update, context,
         "تاریخ بستن معامله:\nYYYY-MM-DD  (e.g. 2026-02-09)",
         reply_markup=_DATE_KEYBOARD,
@@ -3646,13 +3721,13 @@ def _close_summary(data: dict) -> str:
     # The P&L is the trader's typed amount (signed by the status); ROI only
     # appears when the open questionnaire recorded a margin (optional).
     pnl = _close_pnl_signed(data)
+    roi = _close_roi_signed(data)
     margin = data.get("open_margin")
-    roi = _roi_from_pnl(pnl, margin)
     pnl_line = (
         f"• P&L       {_fmt_pnl(pnl)}\n"
         + (f"           ROI {_fmt_roi(roi)}\n" if roi is not None else "")
         + (
-            f"• Margin    {_fmt_num(margin)} $\n"
+            f"• Margin    {_fmt_num(margin)} $ (اطلاعات)\n"
             if margin
             else ""
         )
@@ -3712,10 +3787,10 @@ async def save_close_trade(
         data = dict(context.user_data)
         _reset_flow(context)
         open_id = data.pop("open_id")
-        # The trader types the real dollar result; the status only signs it.
-        _margin = data.get("open_margin")
+        # The trader types the dollar result and the ROI percent; the status
+        # only signs them. Nothing is computed from the margin.
         _close_pnl = _close_pnl_signed(data)
-        _close_roi = _roi_from_pnl(_close_pnl, _margin)
+        _close_roi = _close_roi_signed(data)
         data["_close_pnl"], data["_close_roi"] = _close_pnl, _close_roi
         new_id = db.close_open_trade(
             open_id,
@@ -3761,7 +3836,7 @@ async def save_close_trade(
             + (
                 f"• 💵 P&L: {_fmt_num(_close_pnl)} $"
                 + (
-                    f" ({_fmt_num(_close_roi)}%)"
+                    f" · {_fmt_num(_close_roi)}%"
                     if _close_roi is not None
                     else ""
                 )
@@ -3863,6 +3938,10 @@ def build_open_conversation() -> ConversationHandler:
                 CallbackQueryHandler(_tap_step(ask_open_margin), pattern=_Q_CB_RE),
                 MessageHandler(_ANSWER, _msg_step(ask_open_margin)),
             ],
+            OPEN_LEVERAGE: [
+                CallbackQueryHandler(_tap_step(ask_open_leverage), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_open_leverage)),
+            ],
             OPEN_ENTRY: [
                 CallbackQueryHandler(_tap_step(ask_open_entry), pattern=_Q_CB_RE),
                 MessageHandler(_ANSWER, _msg_step(ask_open_entry)),
@@ -3909,6 +3988,10 @@ def build_close_conversation() -> ConversationHandler:
             CLOSE_AMOUNT: [
                 CallbackQueryHandler(_tap_step(ask_close_amount), pattern=_Q_CB_RE),
                 MessageHandler(_ANSWER, _msg_step(ask_close_amount)),
+            ],
+            CLOSE_ROI: [
+                CallbackQueryHandler(_tap_step(ask_close_roi), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_close_roi)),
             ],
             CLOSE_DATE: [
                 CallbackQueryHandler(_tap_step(ask_close_date), pattern=_Q_CB_RE),
@@ -4016,13 +4099,11 @@ def _recent_detail_text(row) -> str:
     field a flow does not provide shows as “—” instead of crashing.
     """
     roi = row["roi"]
-    if roi is None and row["size"]:
-        roi = row["pnl"] / row["size"] * 100.0
     emoji = _result_emoji(row["hit"])
     side = _DIR_LABEL.get(row["direction"], (row["direction"] or "?").upper())
     side_icon = "📈" if row["direction"] == "long" else "📉"
     market_fa = (
-        "🪙 کریپتو" if (row["market"] or "crypto") == "crypto" else "💵 فارکس"
+        "🪙 Crypto" if (row["market"] or "crypto") == "crypto" else "💵 فارکس"
     )
     tf = row["timeframe"] or "—"
     risk = f"{_fmt_num(row['risk_percent'])}%" if row["risk_percent"] else "—"
@@ -4087,7 +4168,12 @@ def _recent_detail_text(row) -> str:
         f"• نتیجه: {result}\n"
         f"• 💰 مارجین: {_fmt_size(row['size']) if row['size'] else '—'}\n"
         f"• ⚠️ ریسک: {risk}\n"
-        "\n"
+        + (
+            f"• ⚡ اهرم: ×{_fmt_num(row['leverage'])}\n"
+            if row["leverage"]
+            else ""
+        )
+        + "\n"
         f"{date_line}\n"
         + (f"{time_line}\n" if time_line else "")
         + f"• 🧠 حالت: {_ESC(mood)}\n"

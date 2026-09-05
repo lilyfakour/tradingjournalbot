@@ -489,12 +489,13 @@ def close_open_trade(
     screenshot_after: Optional[str],
     pnl: Optional[float] = None,
     roi: Optional[float] = None,
+    leverage: Optional[float] = None,
 ) -> Optional[int]:
     """Move an open trade into the closed `trades` list and return the new id.
 
-    The P&L is the trader's typed dollar result (journal passes it in `pnl`,
-    signed) and ROI is pnl / margin when the open questionnaire recorded a
-    margin — otherwise it stays NULL. Legacy rows keep their computed values.
+    The P&L and ROI are the trader's typed numbers (journal passes them in
+    signed); leverage is the info-only figure from the open questionnaire.
+    Legacy rows keep their computed values.
     """
     conn = _connect()
     try:
@@ -527,7 +528,7 @@ def close_open_trade(
                 mood,
                 row["screenshot"],
                 row["market"],
-                None,  # leverage is retired — the column stays for old rows
+                row["leverage"],  # info-only figure from the open questionnaire
                 row["risk_percent"],
                 row["take_profit"],
                 row["stop_loss"],

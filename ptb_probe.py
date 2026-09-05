@@ -152,7 +152,7 @@ async def main():
     print("PASS  tap opn:add -> questionnaire started (state OPEN_MARKET)")
 
     # 2) market answer flows through the real conversation
-    upd2 = text_up(stub, user, chat, "🪙 کریپتو", 2)
+    upd2 = text_up(stub, user, chat, "🪙 Crypto", 2)
     res2 = conv.check_update(upd2)
     assert res2, "market answer not routed"
     ctx2 = app.context_types.context.from_update(upd2, app)
@@ -184,7 +184,7 @@ async def main():
     # 4) full close chain through the REAL conversation — regression for the
     #    mood bug (ask_close_reason used to return the /trade MOOD state,
     #    which left the close conversation unroutable) AND for the new
-    #    "no leverage, type the dollar result" model.
+    #    "typed dollar result + typed ROI percent" model.
     async def step(text, oid):
         m = Message(
             message_id=oid, date=datetime.now(), chat=chat, from_user=user,
@@ -200,24 +200,26 @@ async def main():
         await cconv.handle_update(u, app, r, cx)
         return cconv._conversations.get((user.id, user.id))
 
-    assert await step("✅ Win (TP)", 11) == journal.CLOSE_AMOUNT
-    assert await step("37.5", 12) == journal.CLOSE_DATE
-    assert await step("2026-09-04", 13) == journal.CLOSE_HOUR
-    assert await step("الان", 14) == journal.CLOSE_PHOTOS
-    assert await step("⏭ بدون اسکرین‌شات", 15) == journal.CLOSE_REASON
-    state_after_reason = await step("TP tapped, momentum gone", 16)
+    assert await step("✅ Win", 11) == journal.CLOSE_AMOUNT
+    assert await step("37.5", 12) == journal.CLOSE_ROI
+    assert await step("-", 13) == journal.CLOSE_DATE  # ⏭ skip the ROI percent
+    assert await step("2026-09-04", 14) == journal.CLOSE_HOUR
+    assert await step("الان", 15) == journal.CLOSE_PHOTOS
+    assert await step("⏭ بدون اسکرین‌شات", 16) == journal.CLOSE_REASON
+    state_after_reason = await step("TP tapped, momentum gone", 17)
     assert state_after_reason == journal.CLOSE_MOOD, state_after_reason
     print("PASS  reason -> CLOSE_MOOD through the real conversation (mood bug fixed)")
-    state_after_mood = await step("آرام", 17)
+    state_after_mood = await step("آرام", 18)
     assert state_after_mood == journal.CLOSE_CONFIRM, state_after_mood
     print("PASS  mood -> CLOSE_CONFIRM through the real conversation")
-    state_after_save = await step("✅ ثبت", 18)
+    state_after_save = await step("✅ ثبت", 19)
     assert state_after_save is None, state_after_save
     closed = db.get_recent(1)[0]
     assert closed["hit"] == "win" and closed["symbol"] == "BTCUSD", dict(closed)
-    # The typed dollar amount (37.5) is stored EXACTLY as given — no
-    # margin/leverage math anywhere.
+    # The typed dollar amount (37.5) is stored EXACTLY as given — no margin
+    # math anywhere, and the skipped ROI percent stays NULL.
     assert closed["pnl"] == 37.5, dict(closed)
+    assert closed["roi"] is None, dict(closed)
     print("PASS  confirm -> saved into history with the typed P&L (37.5 $)")
 
     # 5) the recent-detail card of the just-closed two-phase trade renders —
@@ -228,8 +230,8 @@ async def main():
     assert "اهرم" not in detail, detail
     print("PASS  recent detail of the two-phase trade renders (NULL-safe)")
 
-    # 6) close with a margin on the open trade -> ROI = pnl / margin; the
-    #    budget shifts by the typed P&L; BE skips the amount question.
+    # 6) close with a margin on the open trade — the margin is info-only;
+    #    the budget shifts by the typed P&L; BE skips the amount question.
     oid2 = db.add_open_trade(
         symbol="ETHUSD", direction="short", market="crypto", timeframe="15m",
         reason="probe", screenshot=None, trade_date="2026-09-04",
@@ -244,21 +246,23 @@ async def main():
     await ctx6.refresh_data()
     await cconv.handle_update(upd6, app, r6, ctx6)
     assert ctx6.user_data.get("open_margin") == 50.0, ctx6.user_data
-    assert await step("✅ Win (TP)", 21) == journal.CLOSE_AMOUNT
-    assert await step("16.67", 22) == journal.CLOSE_DATE
-    assert await step("2026-09-04", 23) == journal.CLOSE_HOUR
-    assert await step("الان", 24) == journal.CLOSE_PHOTOS
-    assert await step("⏭ بدون اسکرین‌شات", 25) == journal.CLOSE_REASON
-    assert await step("TP tapped", 26) == journal.CLOSE_MOOD
-    assert await step("آرام", 27) == journal.CLOSE_CONFIRM
-    assert await step("✅ ثبت", 28) is None
+    assert await step("✅ Win", 21) == journal.CLOSE_AMOUNT
+    assert await step("16.67", 22) == journal.CLOSE_ROI
+    assert await step("2.5", 23) == journal.CLOSE_DATE  # typed ROI percent
+    assert await step("2026-09-04", 24) == journal.CLOSE_HOUR
+    assert await step("الان", 25) == journal.CLOSE_PHOTOS
+    assert await step("⏭ بدون اسکرین‌شات", 26) == journal.CLOSE_REASON
+    assert await step("TP tapped", 27) == journal.CLOSE_MOOD
+    assert await step("آرام", 28) == journal.CLOSE_CONFIRM
+    assert await step("✅ ثبت", 29) is None
     closed2 = db.get_recent(1)[0]
-    # The typed 16.67 $ is stored as-is; ROI derives from it and the margin.
+    # The typed 16.67 $ and the typed 2.5 % are stored as-is (Win signs the
+    # percent positive; nothing is derived from the margin).
     assert closed2["pnl"] == 16.67, dict(closed2)
-    assert closed2["roi"] == 33.34, dict(closed2)
+    assert closed2["roi"] == 2.5, dict(closed2)
     assert closed2["size"] == 50.0, dict(closed2)
     assert closed2["leverage"] is None, dict(closed2)
-    print("PASS  margin-aware close stores the typed P&L + ROI (16.67 $ / 33.34 %)")
+    print("PASS  close stores the typed P&L + typed ROI (16.67 $ / 2.5 %)")
     # Budget moved by the typed P&L: it was set to 500 $ after the first
     # close, so only this close's 16.67 counts: 500 + 16.67 = 516.67.
     assert db.get_budget() == 516.67, db.get_budget()
@@ -308,7 +312,7 @@ async def main():
     st, cx = await tstep("menu:trade", 31)
     assert st == journal.MARKET and cx.user_data.get("_flow_q"), (st, cx.user_data)
     fq = cx.user_data["_flow_q"]
-    st, cx = await tstep("q:🪙 کریپتو", fq)
+    st, cx = await tstep("q:🪙 Crypto", fq)
     assert st == journal.SYMBOL and fq in stub.deleted, (st, stub.deleted)
     print("PASS  menu:trade tap -> MARKET; market tap deletes its question")
 
