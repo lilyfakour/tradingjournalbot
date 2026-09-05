@@ -366,31 +366,8 @@ async def main() -> int:
 
     state = await journal.ask_direction(upd.text("📈 خرید"), ctx)
     check(
-        state == journal.LEVERAGE and ctx.user_data["direction"] == "long",
-        "direction -> LEVERAGE",
-    )
-    lev_labels = _labels(_last_markup(upd))
-    check(
-        all(
-            lbl in lev_labels
-            for lbl in ("×2", "×3", "×5", "×10", "×20", "×50", "×100", "×125",
-                        "⏭ بدون اهرم", "✖️ لغو")
-        ),
-        "leverage buttons present",
-    )
-
-    state = await journal.ask_leverage(upd.text("10x"), ctx)
-    check(
-        state == journal.TIMEFRAME and ctx.user_data["leverage"] == 10,
-        "typed '10x' -> TIMEFRAME with leverage 10",
-    )
-    tf_labels = _labels(upd.sent[-1][2])
-    check(
-        all(
-            t in tf_labels
-            for t in ("1m", "5m", "15m", "30m", "1h", "4h", "1D", "1W", "1M")
-        ),
-        "timeframe buttons present",
+        state == journal.TIMEFRAME and ctx.user_data["direction"] == "long",
+        "direction -> TIMEFRAME (leverage question is gone)",
     )
 
     state = await journal.ask_timeframe(upd.text("1h"), ctx)
@@ -413,20 +390,25 @@ async def main() -> int:
     )
     state = await journal.ask_result(upd.text("✅ Win"), ctx)
     check(
-        state == journal.MARGIN
+        state == journal.PNL_AMOUNT
         and ctx.user_data["hit"] == "win"
         and ctx.user_data["exit_price"] == 110,
-        "Win -> MARGIN with exit = TP",
+        "Win -> PNL_AMOUNT with exit = TP",
     )
-    state = await journal.ask_margin(upd.text("2"), ctx)
+    state = await journal.ask_pnl_amount(upd.text("2"), ctx)
     check(
-        state == journal.RISK and ctx.user_data["size"] == 2,
-        "margin stored -> RISK",
+        state == journal.MARGIN and ctx.user_data["pnl_amount"] == 2,
+        "typed dollar amount stored -> MARGIN",
+    )
+    state = await journal.ask_margin(upd.text("⏭ رد کردن"), ctx)
+    check(
+        state == journal.RISK and "size" not in ctx.user_data,
+        "margin skipped -> RISK with no margin stored",
     )
     state = await journal.ask_risk(upd.text("1%"), ctx)
     check(
         state == journal.TRADE_DATE and ctx.user_data["risk_percent"] == 1,
-        "risk stored -> TRADE_DATE (P&L auto-calculated, no question)",
+        "risk stored -> TRADE_DATE",
     )
 
     state = await journal.ask_trade_date(upd.text("📅 امروز"), ctx)
@@ -489,15 +471,22 @@ async def main() -> int:
     check(state == journal.CONFIRM, "after-shot skipped -> CONFIRM")
     summary = upd.sent[-1][1]
     check(
-        "TF·Lev" in summary and "1h" in summary and "10x" in summary,
-        "summary shows timeframe and leverage",
+        "TF" in summary and "1h" in summary,
+        "summary shows the timeframe",
     )
     check("Market" in summary and "🪙 کریپتو" in summary, "summary shows market")
     check(
         "Result" in summary and "🟢" in summary and "Win" in summary,
         "summary shows the result with emoji",
     )
-    check("Margin" in summary, "summary shows margin")
+    check(
+        "P&L" in summary and "+$2.00" in summary,
+        "summary shows the typed signed $ P&L",
+    )
+    check(
+        "Margin" not in summary,
+        "summary hides margin when it was skipped",
+    )
     check("Risk" in summary and "1%" in summary, "summary shows risk")
     check(
         "Mood" in summary and "مضطرب" in summary,
@@ -507,10 +496,6 @@ async def main() -> int:
     check(
         "P&L" in summary and "+$2.00" in summary,
         "summary shows signed $ P&L",
-    )
-    check(
-        "ROI" in summary and "+100.00%" in summary,
-        "summary shows per-trade ROI",
     )
     check(
         "__" not in summary and "•" in summary and "\n\n" in summary,
@@ -536,7 +521,7 @@ async def main() -> int:
         "save confirmation is airy and bold, no literal underscores",
     )
 
-    # --- second trade: forex flow, typed fallbacks, manual P&L ----------------
+    # --- second trade: forex flow, typed fallbacks, typed P&L ----------------
     ctx2 = FakeContext()
     await journal.trade_start(upd.text("/trade"), ctx2)
     state = await journal.ask_market(upd.text("💵 فارکس"), ctx2)
@@ -546,8 +531,6 @@ async def main() -> int:
     )
     await journal.ask_symbol(upd.text("BTCUSD"), ctx2)
     await journal.ask_direction(upd.text("S"), ctx2)
-    state = await journal.ask_leverage(upd.text("×10"), ctx2)
-    check(state == journal.TIMEFRAME and ctx2.user_data["leverage"] == 10, "×10 button parsed")
     state = await journal.ask_timeframe(upd.text("banana"), ctx2)
     check(state == journal.TIMEFRAME, "invalid timeframe reprompts")
     state = await journal.ask_timeframe(upd.text("daily"), ctx2)
@@ -560,11 +543,14 @@ async def main() -> int:
     await journal.ask_stop_loss(upd.text("51000"), ctx2)
     state = await journal.ask_result(upd.text("❌ Loss"), ctx2)
     check(
-        state == journal.MARGIN
+        state == journal.PNL_AMOUNT
         and ctx2.user_data["hit"] == "lose"
         and ctx2.user_data["exit_price"] == 51000,
         "Loss stores exit = stop loss",
     )
+    check("ضرر" in upd.sent[-1][1], "loss amount prompt mentions the loss")
+    state = await journal.ask_pnl_amount(upd.text("0.02"), ctx2)
+    check(state == journal.MARGIN, "typed dollar loss stored -> MARGIN")
     check("USD" in upd.sent[-1][1], "forex margin prompt mentions dollars")
     state = await journal.ask_margin(upd.text("0.1"), ctx2)
     check(state == journal.RISK, "margin stored -> RISK")
@@ -588,7 +574,8 @@ async def main() -> int:
     check(state == journal.ConversationHandler.END, "typed 'y' saves -> END")
 
     rows = db.get_recent(2)
-    # Auto P&L for this short: 0.1 margin * 10x * ((50000 - 51000) / 50000)
+    # The typed dollar loss (0.02) is stored EXACTLY as given — the status
+    # only signs it; ROI derives from it and the margin (0.02/0.1 = 20%).
     check(
         rows[0]["symbol"] == "BTCUSD"
         and rows[0]["direction"] == "short"
@@ -599,7 +586,7 @@ async def main() -> int:
         and rows[0]["trade_date"] == date.today().isoformat()
         and rows[0]["market"] == "forex"
         and rows[0]["hit"] == "lose"
-        and rows[0]["leverage"] == 10
+        and rows[0]["leverage"] is None
         and rows[0]["risk_percent"] is None
         and rows[0]["take_profit"] == 49000
         and rows[0]["stop_loss"] == 51000
@@ -607,18 +594,19 @@ async def main() -> int:
         and rows[0]["size"] == 0.1
         and rows[0]["roi"] is not None
         and abs(rows[0]["roi"] - (-20.0)) < 1e-9,
-        "second trade saved: forex, Loss, auto P&L + ROI, risk skipped",
+        "second trade saved: forex, Loss, typed P&L + ROI, leverage gone",
     )
 
     # --- 🕘 Recent: one button per trade, tapping SENDS the detail --------------
     recent_upd = FakeUpdate()
-    await journal.recent(recent_upd.text("/recent"), FakeContext())
-    panel_text = _reply_text(recent_upd)
+    rctx = FakeContext(log=recent_upd.sent)
+    await journal.recent(recent_upd.text("/recent"), rctx)
+    panel_text = recent_upd.sent[-1][1]
     check(
         panel_text.startswith("🕘 ") and "صفحه" in panel_text,
         "/recent sends the paginated panel",
     )
-    markup = _last_markup(recent_upd)
+    markup = recent_upd.sent[-1][2]
     check(
         isinstance(markup, InlineKeyboardMarkup),
         "/recent panel uses inline buttons",
@@ -627,9 +615,12 @@ async def main() -> int:
     cbs = [cb for _, cb in flat_panel]
     trade_btns = [(t, cb) for t, cb in flat_panel if cb.startswith("rec:v:")]
     check(
-        "rec:home" in cbs and "rec:noop" in cbs
-        and any(c.startswith("rec:r:") for c in cbs),
-        "panel has range, pager and home callbacks",
+        any(c.startswith("rec:r:") for c in cbs) and "rec:noop" in cbs,
+        "panel has range callbacks (single page -> pager is all noop)",
+    )
+    check(
+        "nav:back" in cbs and "nav:home" in cbs,
+        "panel has 🔙 back and 🏠 home buttons",
     )
     check(
         len(trade_btns) == 2,
@@ -720,15 +711,15 @@ async def main() -> int:
         and rows[1]["screenshot"] == shot_name
         and rows[1]["market"] == "crypto"
         and rows[1]["hit"] == "win"
-        and rows[1]["leverage"] == 10
+        and rows[1]["leverage"] is None
         and rows[1]["risk_percent"] == 1
         and rows[1]["take_profit"] == 110
         and rows[1]["stop_loss"] == 95
         and rows[1]["exit_price"] == 110
-        and rows[1]["size"] == 2
-        and rows[1]["roi"] is not None
-        and abs(rows[1]["roi"] - 100.0) < 1e-9,
-        "first trade stored with market/hit/leverage/risk + auto P&L/ROI",
+        and rows[1]["size"] is None
+        and rows[1]["pnl"] == 2.0
+        and rows[1]["roi"] is None,
+        "first trade stored with market/hit/risk + the typed P&L (margin skipped)",
     )
 
     # --- 🟢 open trades: add questionnaire, panel, callbacks --------------------
@@ -747,13 +738,8 @@ async def main() -> int:
     )
     state = await journal.ask_open_direction(upd.text("📈 Long"), octx)
     check(
-        state == journal.OPEN_LEVERAGE and octx.user_data["direction"] == "long",
-        "open: direction -> OPEN_LEVERAGE",
-    )
-    state = await journal.ask_open_leverage(upd.text("×20"), octx)
-    check(
-        state == journal.OPEN_TIMEFRAME and octx.user_data["leverage"] == 20,
-        "open: leverage ×20 -> OPEN_TIMEFRAME",
+        state == journal.OPEN_TIMEFRAME and octx.user_data["direction"] == "long",
+        "open: direction -> OPEN_TIMEFRAME (leverage question is gone)",
     )
     state = await journal.ask_open_timeframe(upd.text("1h"), octx)
     check(state == journal.OPEN_REASON, "open: timeframe -> OPEN_REASON (order)")
@@ -796,14 +782,14 @@ async def main() -> int:
         "Market" in summary and "🪙 کریپتو" in summary
         and "Symbol" in summary and "XAUUSD" in summary
         and "TF" in summary and "1h" in summary
-        and "Lev" in summary and "20x" in summary
         and "Reason" in summary and "broke range high" in summary
         and "Shot" in summary and "📷" in summary
         and "Date" in summary and "2026-03-01 10:30" in summary
         and "Risk" in summary and "1%" in summary
         and "Entry" in summary and "2000" in summary
         and "TP / SL" in summary and "2100" in summary and "1950" in summary
-        and "معاملات باز" in summary,
+        and "معاملات باز" in summary
+        and "Lev" not in summary,
         "open: confirmation summary shows every answer (airy HTML)",
     )
     closed_before = db.count_trades()
@@ -825,14 +811,14 @@ async def main() -> int:
         and xau["screenshot"] == open_shot
         and xau["trade_date"] == "2026-03-01" and xau["entry_time"] == "10:30"
         and xau["risk_percent"] == 1 and xau["entry_price"] == 2000
-        and xau["leverage"] == 20
+        and xau["leverage"] is None
         and xau["take_profit"] == 2100 and xau["stop_loss"] == 1950,
-        "open: every questionnaire answer stored",
+        "open: every questionnaire answer stored (no leverage)",
     )
     check(
-        "⚡ 20x" in journal._open_detail_text(xau)
+        "⚡" not in journal._open_detail_text(xau)
         and "💰 Margin: —" in journal._open_detail_text(xau),
-        "open: detail card shows leverage and the unset margin",
+        "open: detail card has no leverage and shows the unset margin",
     )
     check(
         db.count_trades() == closed_before,
@@ -913,14 +899,17 @@ async def main() -> int:
         state == journal.OPEN_ENTRY and mctx.user_data["margin"] == 5.0,
         "open: ✅ پیشنهاد ربات stores the auto-calculated margin",
     )
-    # ...or keep the trader's own number.
+    # ...or retype a different number (no ✍️ keep button anymore — the typed
+    # value simply lands again; with risk unset there is no conflict check).
     mctx.user_data.pop("margin")
     await journal.ask_open_margin(upd.text("50"), mctx)
-    state = await journal.ask_open_margin(upd.text(journal.MARGIN_KEEP_BTN), mctx)
+    mctx.user_data.pop("risk_percent")
+    state = await journal.ask_open_margin(upd.text("46"), mctx)
     check(
-        state == journal.OPEN_ENTRY and mctx.user_data["margin"] == 50.0,
-        "open: ✍️ عدد خودم keeps the typed margin",
+        state == journal.OPEN_ENTRY and mctx.user_data["margin"] == 46.0,
+        "open: retyping the margin replaces the flagged value",
     )
+    mctx.user_data["risk_percent"] = 1  # restore for later assertions
     # 🧮 without a budget asks for a manual number instead of crashing.
     db.set_budget(None)
     mctx2 = FakeContext()
@@ -932,7 +921,7 @@ async def main() -> int:
     )
     db.set_budget(500.0)
 
-    # close math: a skipped leverage means 1x (no inflation of P&L/ROI)
+    # close math: the typed P&L is stored as-is; leverage stays NULL.
     oid_1x = db.add_open_trade(
         symbol="BTCUSD", direction="long", market="crypto", timeframe="1h",
         reason="", screenshot=None, trade_date="2026-03-02",
@@ -942,14 +931,13 @@ async def main() -> int:
     new_id_1x = db.close_open_trade(
         oid_1x, hit="win", exit_price=51000.0, trade_date="2026-03-02",
         exit_time="", notes="", mood="", exit_photos=None,
-        screenshot_after=None,
+        screenshot_after=None, pnl=2.0, roi=2.0,
     )
     row_1x = db.get_trade(new_id_1x)
-    # long 50000 -> 51000, margin 100, leverage skipped (1x): +2.0 USD
     check(
         row_1x["pnl"] == 2.0 and row_1x["roi"] == 2.0
         and row_1x["leverage"] is None,
-        "close: skipped leverage means 1x P&L (history keeps leverage NULL)",
+        "close: typed P&L/ROI stored (history keeps leverage NULL)",
     )
     db.delete_trade(new_id_1x)  # keep the suite's later aggregates intact
 
@@ -959,17 +947,17 @@ async def main() -> int:
     await journal.ask_market(upd.text("🪙 کریپتو"), ctx5)
     await journal.ask_symbol(upd.text("EURUSD"), ctx5)
     await journal.ask_direction(upd.text("l"), ctx5)
-    state = await journal.ask_leverage(upd.text("⏭ بدون اهرم"), ctx5)
-    check(
-        state == journal.TIMEFRAME and "leverage" not in ctx5.user_data,
-        "leverage skippable",
-    )
     await journal.ask_timeframe(upd.text("5m"), ctx5)
     await journal.ask_entry(upd.text("1.1"), ctx5)
     await journal.ask_take_profit(upd.text("1.2"), ctx5)
     await journal.ask_stop_loss(upd.text("1.05"), ctx5)
     state = await journal.ask_result(upd.text("win"), ctx5)  # typed alias
-    check(state == journal.MARGIN and ctx5.user_data["hit"] == "win", "typed 'win' alias")
+    check(
+        state == journal.PNL_AMOUNT and ctx5.user_data["hit"] == "win",
+        "typed 'win' alias",
+    )
+    state = await journal.ask_pnl_amount(upd.text("1.5"), ctx5)
+    check(state == journal.MARGIN, "typed dollar amount -> MARGIN")
     await journal.ask_margin(upd.text("1"), ctx5)
     state = await journal.ask_risk(upd.text("2"), ctx5)  # typed without %
     check(
@@ -1037,7 +1025,6 @@ async def main() -> int:
     await journal.ask_market(upd.text("🪙 کریپتو"), ctx3)
     await journal.ask_symbol(upd.text("AAPL"), ctx3)
     await journal.ask_direction(upd.text("long"), ctx3)
-    await journal.ask_leverage(upd.text("×5"), ctx3)
     await journal.ask_timeframe(upd.text("5m"), ctx3)
     await journal.ask_entry(upd.text("200"), ctx3)
     await journal.ask_take_profit(upd.text("210"), ctx3)
@@ -1080,16 +1067,16 @@ async def main() -> int:
     await journal.ask_market(upd.text("🪙 کریپتو"), ctx4)
     await journal.ask_symbol(upd.text("TSLA"), ctx4)
     await journal.ask_direction(upd.text("l"), ctx4)
-    await journal.ask_leverage(upd.text("×10"), ctx4)
     await journal.ask_timeframe(upd.text("4h"), ctx4)
     await journal.ask_entry(upd.text("10"), ctx4)
     await journal.ask_take_profit(upd.text("11"), ctx4)
     await journal.ask_stop_loss(upd.text("9"), ctx4)
     state = await journal.ask_result(upd.text("✅ Win"), ctx4)
     check(
-        state == journal.MARGIN and ctx4.user_data["exit_price"] == 11,
+        state == journal.PNL_AMOUNT and ctx4.user_data["exit_price"] == 11,
         "Win (ctx4)",
     )
+    await journal.ask_pnl_amount(upd.text("0.5"), ctx4)
     await journal.ask_margin(upd.text("3"), ctx4)
     await journal.ask_risk(upd.text("-"), ctx4)
     await journal.ask_trade_date(upd.text("-"), ctx4)
@@ -1111,12 +1098,12 @@ async def main() -> int:
     await journal.ask_market(upd.text("🪙 کریپتو"), ctx6)
     await journal.ask_symbol(upd.text("MSFT"), ctx6)
     await journal.ask_direction(upd.text("short"), ctx6)
-    await journal.ask_leverage(upd.text("×20"), ctx6)
     await journal.ask_timeframe(upd.text("1h"), ctx6)
     await journal.ask_entry(upd.text("400"), ctx6)
     await journal.ask_take_profit(upd.text("380"), ctx6)
     await journal.ask_stop_loss(upd.text("410"), ctx6)
     await journal.ask_result(upd.text("❌ Loss"), ctx6)
+    await journal.ask_pnl_amount(upd.text("1"), ctx6)
     await journal.ask_margin(upd.text("2"), ctx6)
     await journal.ask_risk(upd.text("-"), ctx6)
     state = await journal.ask_trade_date(upd.text("2026-02-01 09:30"), ctx6)
@@ -1132,7 +1119,7 @@ async def main() -> int:
     state = await journal.save_trade(upd.text("y"), ctx6)
     check(state == journal.ConversationHandler.END, "fourth trade saved")
     msft_row = db.get_recent(1)[0]
-    # Auto P&L for this short: 2 margin * 20x * ((400 - 410) / 400) = -1.0
+    # The typed dollar loss (1 $) is stored as-is; leverage is retired.
     check(
         msft_row["symbol"] == "MSFT"
         and msft_row["trade_date"] == "2026-02-01 09:30"
@@ -1141,11 +1128,11 @@ async def main() -> int:
         and msft_row["exit_price"] == 410
         and abs(msft_row["pnl"] - (-1.0)) < 1e-9
         and msft_row["market"] == "crypto"
-        and msft_row["leverage"] == 20
+        and msft_row["leverage"] is None
         and msft_row["take_profit"] == 380
         and msft_row["stop_loss"] == 410
         and msft_row["size"] == 2,
-        "datetime + mood stored in trade",
+        "datetime + mood + typed P&L stored in trade",
     )
 
     # --- 🗑 delete inside the recent detail view (disposable trade) -------------
@@ -1171,8 +1158,8 @@ async def main() -> int:
     del_upd = await _tap_recent(f"rec:d:{dummy_id}")
     check(db.get_trade(dummy_id) is None, "🗑 tap inside detail deletes the trade")
     check(
-        _reply_text(del_upd) == "🗑 معامله حذف شد ✅",
-        "deleting a sent detail confirms on the detail message",
+        _reply_text(del_upd).startswith("🕘"),
+        "deleting inside a sent detail morphs the screen into the refreshed panel",
     )
     recheck = await _tap_recent("rec:r:all")
     check(
@@ -1189,7 +1176,8 @@ async def main() -> int:
 
     # --- 🟢 panel: inline buttons, detail card, close flow ----------------------
     op_upd = FakeUpdate()
-    await journal.open_trades(op_upd.text("/open"), FakeContext())
+    op_ctx = FakeContext(log=op_upd.sent)
+    await journal.open_trades(op_upd.text("/open"), op_ctx)
     op_markup = _last_markup(op_upd)
     check(
         isinstance(op_markup, InlineKeyboardMarkup)
@@ -1199,8 +1187,8 @@ async def main() -> int:
     op_flat = _inline_flat(op_markup)
     check(
         (f"🟢 #{xau['id']} — XAUUSD · 2000 📷", f"opn:v:{xau['id']}") in op_flat
-        and "opn:home" in [cb for _, cb in op_flat],
-        "open panel: one button per open trade with entry price + pager",
+        and "nav:home" in [cb for _, cb in op_flat],
+        "open panel: one button per open trade with entry price + 🏠",
     )
     check(
         ("➕ ثبت معامله باز", "opn:add") in op_flat,
@@ -1275,8 +1263,13 @@ async def main() -> int:
     )
     state = await journal.ask_close_status(upd.text("✅ Win (TP)"), cctx)
     check(
-        state == journal.CLOSE_DATE and cctx.user_data["hit"] == "win",
-        "close: Win (TP) -> CLOSE_DATE",
+        state == journal.CLOSE_AMOUNT and cctx.user_data["hit"] == "win",
+        "close: Win (TP) -> CLOSE_AMOUNT",
+    )
+    state = await journal.ask_close_amount(upd.text("12.5"), cctx)
+    check(
+        state == journal.CLOSE_DATE and cctx.user_data["close_pnl"] == 12.5,
+        "close: typed dollar result -> CLOSE_DATE",
     )
     state = await journal.ask_close_date(upd.text("2026-03-03"), cctx)
     check(state == journal.CLOSE_HOUR, "close: exit date -> CLOSE_HOUR (separate)")
@@ -1351,9 +1344,9 @@ async def main() -> int:
         and closed["mood"] == "calm"
         and closed["screenshot"] == open_shot
         and len((closed["exit_photos"] or "").splitlines()) == 2
-        and closed["pnl"] is None and closed["size"] is None
+        and closed["pnl"] == 12.5 and closed["size"] is None
         and closed["roi"] is None,
-        "closed row keeps both reasons/times/photos and NULL P&L",
+        "closed row keeps both reasons/times/photos + the typed P&L (no margin)",
     )
     st_after = db.get_stats()
     check(
@@ -1384,8 +1377,13 @@ async def main() -> int:
     )
     state = await journal.ask_close_status(upd.text("✏️ Manual"), cctx2)
     check(
-        state == journal.CLOSE_DATE and cctx2.user_data["hit"] == "manual",
-        "close: Manual -> CLOSE_DATE",
+        state == journal.CLOSE_AMOUNT and cctx2.user_data["hit"] == "manual",
+        "close: Manual -> CLOSE_AMOUNT",
+    )
+    state = await journal.ask_close_amount(upd.text("7"), cctx2)
+    check(
+        state == journal.CLOSE_DATE and cctx2.user_data["close_pnl"] == 7.0,
+        "close: manual exit also stores the typed dollar result",
     )
     await journal.ask_close_date(upd.text("2026-03-04"), cctx2)
     state = await journal.ask_close_hour(upd.text("-"), cctx2)
@@ -1418,7 +1416,11 @@ async def main() -> int:
     )
     cctx3 = FakeContext()
     await journal._close_begin(oid3, upd.text("x"), cctx3)
-    await journal.ask_close_status(upd.text("➖ BE"), cctx3)
+    state = await journal.ask_close_status(upd.text("➖ BE"), cctx3)
+    check(
+        state == journal.CLOSE_DATE,
+        "close: BE skips the amount question entirely",
+    )
     await journal.ask_close_date(upd.text("2026-03-05"), cctx3)
     state = await journal.ask_close_hour(upd.text("12:00"), cctx3)
     check(
@@ -1442,8 +1444,8 @@ async def main() -> int:
     # --- 🕘 recent detail of a two-phase trade (the tap that used to die) --------
     dtxt = journal._recent_detail_text(closed)  # TP close: rich two-phase row
     check(
-        "مارجین: —" in dtxt and "سود و زیان: <b>—</b>" in dtxt,
-        "two-phase detail renders '—' for NULL margin/P&L (no crash)",
+        "مارجین: —" in dtxt and "سود و زیان: <b>+$12.50</b>" in dtxt,
+        "two-phase detail renders the typed P&L and '—' for the margin",
     )
     check(
         "دلیل ورود" in dtxt and "broke range high" in dtxt
@@ -1502,7 +1504,8 @@ async def main() -> int:
 
     # --- 🟢 /open with nothing open: empty panel with ➕ (no auto-start) ---------
     empty_upd = FakeUpdate()
-    await journal.open_trades(empty_upd.text("/open"), FakeContext())
+    empty_ctx = FakeContext(log=empty_upd.sent)
+    await journal.open_trades(empty_upd.text("/open"), empty_ctx)
     empty_flat = _inline_flat(_last_markup(empty_upd))
     check(
         ("➕ ثبت معامله باز", "opn:add") in empty_flat
@@ -1530,7 +1533,7 @@ async def main() -> int:
     breakdown = db.get_mood_breakdown()
     check(
         [(r["mood"], r["trades"], r["total"]) for r in breakdown]
-        == [("anxious", 1, 2.0), ("calm", 2, -1.0)],
+        == [("calm", 2, 11.5), ("anxious", 1, 2.0)],
         "mood breakdown ordered by P&L",
     )
     stats_all = db.get_stats()
@@ -1611,12 +1614,13 @@ async def main() -> int:
         "period tap re-renders the panel in place (no new messages)",
     )
 
-    # Symbols tap -> the picker is its OWN message with paged symbol buttons
+    # Symbols tap -> the picker MORPHS the same screen message (🔙 brings the
+    # stats panel straight back — no separate picker message anymore)
     await journal.on_stats_callback(_cb_update("stat:open"), stats_ctx)
     last = stats_upd.sent[-1]
     check(
-        last[0] == "bot-send" and "نمادها" in last[1],
-        "Symbols tap sends a separate symbol-picker message",
+        last[0] == "bot-edit" and "نمادها" in last[1],
+        "Symbols tap morphs the panel into the symbol picker",
     )
     pk = last[2]
     pk_labels = [b.text for row in pk.inline_keyboard for b in row]
@@ -1710,8 +1714,8 @@ async def main() -> int:
     )
     check(ws.max_row == 8, "export has one row per trade (7 trades)")
     check(
-        "Screenshot" not in [c.value for c in ws[1]] and ws.max_column == 19,
-        "export has no screenshot columns (photos stay in Telegram)",
+        "Screenshot" not in [c.value for c in ws[1]] and ws.max_column == 18,
+        "export has no screenshot/leverage columns (photos stay in Telegram)",
     )
     row2 = [c.value for c in ws[2]]
     check(
@@ -1723,13 +1727,12 @@ async def main() -> int:
         and row2[7] == 110  # take profit
         and row2[8] == 95  # stop loss
         and row2[9] == "win"  # result (stored in the hit column)
-        and row2[10] == 10  # leverage
-        and row2[11] == 2  # margin
-        and row2[12] == 1  # risk %
-        and row2[13] == rows[1]["pnl"]  # P&L
-        and row2[14] == rows[1]["roi"] == 100.0  # ROI %
-        and row2[15] == rows[1]["trade_date"]  # date moved after ROI
-        and row2[16] == "anxious",
+        and row2[10] is None  # margin (skipped in the new flow)
+        and row2[11] == 1  # risk %
+        and row2[12] == rows[1]["pnl"]  # P&L (typed)
+        and row2[13] is None  # ROI unknown without a margin
+        and row2[14] == rows[1]["trade_date"]
+        and row2[15] == "anxious",
         "export row values match the stored trade",
     )
     check(ws["N2"].number_format == "0.####", "P&L column stays numeric")
@@ -1841,7 +1844,8 @@ async def main() -> int:
             hit="tp",
         )
     pg_upd = FakeUpdate()
-    await journal.recent(pg_upd.text("/recent"), FakeContext())
+    pg_ctx = FakeContext(log=pg_upd.sent)
+    await journal.recent(pg_upd.text("/recent"), pg_ctx)
     pg_cbs = [cb for _, cb in _inline_flat(_last_markup(pg_upd))]
     check(
         "rec:p:2" in pg_cbs,
@@ -1937,8 +1941,8 @@ async def main() -> int:
         "💰 بودجه tap routes to the settings screen callback",
     )
     check(
-        bool(_settings_cb_h.check_update(_cb_update("nav:back:main"))),
-        "🔙 بازگشت tap routes to the back-to-menu callback",
+        not _settings_cb_h.check_update(_cb_update("nav:back")),
+        "🔙/🏠 taps are handled by the shared nav handler, not the settings one",
     )
 
     def _photo_update():
@@ -1974,12 +1978,12 @@ async def main() -> int:
         (journal.MARKET, "🪙 کریپتو", journal.ask_market),
         (journal.SYMBOL, "EURUSD", journal.ask_symbol),
         (journal.DIRECTION, "📈 خرید", journal.ask_direction),
-        (journal.LEVERAGE, "×10", journal.ask_leverage),
         (journal.TIMEFRAME, "5m", journal.ask_timeframe),
         (journal.ENTRY, "100", journal.ask_entry),
         (journal.TAKE_PROFIT, "110", journal.ask_take_profit),
         (journal.STOP_LOSS, "95", journal.ask_stop_loss),
         (journal.RESULT, "✅ Win", journal.ask_result),
+        (journal.PNL_AMOUNT, "25", journal.ask_pnl_amount),
         (journal.MARGIN, "2", journal.ask_margin),
         (journal.RISK, "1%", journal.ask_risk),
         (journal.TRADE_DATE, "2026-02-09", journal.ask_trade_date),
@@ -2051,13 +2055,13 @@ async def main() -> int:
     menu_text = menu_upd.sent[-1][1]
     check(
         all(
-            cmd in menu_text
-            for cmd in (
-                "/trade", "/open", "/opens", "/recent",
-                "/stats", "/delete", "/cancel",
+            word in menu_text
+            for word in (
+                "ثبت معامله بسته", "ثبت معامله باز", "معاملات باز",
+                "معاملات اخیر", "آمار", "تنظیمات",
             )
         ),
-        "menu lists every command with an explanation",
+        "menu lists every screen with an explanation",
     )
     menu_kb = menu_upd.sent[-1][2]
     check(
@@ -2095,7 +2099,7 @@ async def main() -> int:
         and menu_handler.callback is journal.on_menu_callback,
         "every menu: tap dispatches through on_menu_callback",
     )
-    for data in ("opn:add", "opn:c:12", "q:cancel", "nav:back:main", "stat:p:1w"):
+    for data in ("opn:add", "opn:c:12", "q:cancel", "nav:back", "stat:p:1w"):
         check(
             not _menu_routes(data),
             f"non-menu callback '{data}' is not routed by the menu handler",
@@ -2213,8 +2217,6 @@ async def main() -> int:
         (journal.OPEN_MARKET, "🪙 کریپتو", journal.ask_open_market),
         (journal.OPEN_SYMBOL, "XAUUSD", journal.ask_open_symbol),
         (journal.OPEN_DIRECTION, "📈 Long", journal.ask_open_direction),
-        (journal.OPEN_LEVERAGE, "×10", journal.ask_open_leverage),
-        (journal.OPEN_LEVERAGE, "⏭ بدون اهرم", journal.ask_open_leverage),
         (journal.OPEN_TIMEFRAME, "1h", journal.ask_open_timeframe),
         (journal.OPEN_REASON, "broke out", journal.ask_open_reason),
         (journal.OPEN_SCREENSHOT, "-", journal.ask_open_screenshot_text),
@@ -2223,6 +2225,7 @@ async def main() -> int:
         (journal.OPEN_TRADE_HOUR, "الان", journal.ask_open_trade_hour),
         (journal.OPEN_RISK, "1%", journal.ask_open_risk),
         (journal.OPEN_MARGIN, "250", journal.ask_open_margin),
+        (journal.OPEN_MARGIN, "⏭ رد کردن", journal.ask_open_margin),
         (journal.OPEN_ENTRY, "2000", journal.ask_open_entry),
         (journal.OPEN_TAKE_PROFIT, "2100", journal.ask_open_take_profit),
         (journal.OPEN_STOP_LOSS, "1950", journal.ask_open_stop_loss),

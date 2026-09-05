@@ -4,12 +4,26 @@ import logging
 import os
 from pathlib import Path
 
+from telegram import BotCommand, MenuButtonCommands
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 import db
 import journal
 
 BOT_DIR = Path(__file__).resolve().parent
+
+# The ☰ Menu button (the little "menu" next to the message box) opens this
+# command list — the same commands the main menu covers, for power users.
+BOT_COMMANDS = [
+    BotCommand("start", "🏠 منوی اصلی"),
+    BotCommand("opens", "🟢 معاملات باز"),
+    BotCommand("recent", "🕘 معاملات اخیر"),
+    BotCommand("stats", "📊 آمار عملکرد"),
+    BotCommand("settings", "⚙️ تنظیمات (بودجه)"),
+    BotCommand("export", "📥 خروجی اکسل"),
+    BotCommand("delete", "🗑 حذف معامله"),
+    BotCommand("cancel", "✖️ لغو فرایند جاری"),
+]
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(name)s - %(message)s",
@@ -54,15 +68,15 @@ def get_token() -> str:
 
 
 async def post_init(app: Application) -> None:
-    """Remove the legacy ☰ command list / menu button.
+    """Register the ☰ Menu button (Telegram's command list) on every start.
 
-    The inline UI needs no slash-command menu — everything is a button on the
-    bot's messages. The old registration would otherwise keep living in
-    Telegram clients, so it is cleared on every start.
+    The Menu button is Telegram's own UI element next to the message box —
+    separate from the inline buttons on the bot's messages. Registering the
+    commands on every start also repairs stale client state after redeploys.
     """
-    await app.bot.set_my_commands([])
-    await app.bot.set_chat_menu_button()
-    logger.info("Legacy command menu cleared (everything is inline now).")
+    await app.bot.set_my_commands(BOT_COMMANDS)
+    await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    logger.info("☰ Menu button registered (%d commands).", len(BOT_COMMANDS))
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -73,6 +87,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 def _register_handlers(app: Application) -> None:
     """Register every command, conversation and callback handler."""
     app.add_handler(CommandHandler("start", journal.show_menu))
+    app.add_handler(CommandHandler("help", journal.show_menu))
     app.add_handler(CommandHandler("settings", journal.show_settings))
     app.add_handler(journal.build_conversation())
     app.add_handler(journal.build_open_conversation())
@@ -81,6 +96,7 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(journal.build_recent_callbacks())
     app.add_handler(journal.build_open_callbacks())
     app.add_handler(journal.build_menu_callbacks())
+    app.add_handler(journal.build_nav_callbacks())
     for handler in journal.build_settings_handlers():
         app.add_handler(handler)
     app.add_handler(CommandHandler("recent", journal.recent))

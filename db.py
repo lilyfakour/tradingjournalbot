@@ -224,8 +224,23 @@ def get_budget() -> Optional[float]:
         return None
 
 
+def adjust_budget(delta: float) -> Optional[float]:
+    """Move the budget by delta (profit ➕ / loss ➖); returns the new value.
+
+    Budget feature: a closed trade shifts the configured budget by its real
+    P&L, so ⚙️ تنظیمات always shows the live account size. With no budget
+    configured, nothing happens (returns None) — the trader hasn't opted in.
+    """
+    current = get_budget()
+    if current is None:
+        return None
+    new_value = round(current + delta, 2)
+    set_budget(new_value)
+    return new_value
+
+
 def set_budget(value: Optional[float]) -> None:
-    """Store (or, with None, clear) the user's budget in USD."""
+    """Store (or, with None, clear) the budget. A number also un-clears it."""
     set_setting("budget", f"{value:.2f}" if value is not None else None)
 
 
@@ -472,12 +487,14 @@ def close_open_trade(
     mood: str,
     exit_photos: Optional[str],
     screenshot_after: Optional[str],
+    pnl: Optional[float] = None,
+    roi: Optional[float] = None,
 ) -> Optional[int]:
     """Move an open trade into the closed `trades` list and return the new id.
 
-    The open questionnaire has no margin question, so size/pnl/roi are stored
-    as NULL (never a fake 0) — the stats panel classifies win/loss/BE from
-    `hit` and the price direction for such rows.
+    The P&L is the trader's typed dollar result (journal passes it in `pnl`,
+    signed) and ROI is pnl / margin when the open questionnaire recorded a
+    margin — otherwise it stays NULL. Legacy rows keep their computed values.
     """
     conn = _connect()
     try:
@@ -486,20 +503,7 @@ def close_open_trade(
         ).fetchone()
         if row is None:
             return None
-        # When the open questionnaire recorded a margin (budget feature), the
-        # close can compute real P&L and ROI; margin-less closes keep NULL.
-        # Leverage multiplies the price move; a skipped question means 1x.
         margin = row["margin"]
-        leverage = row["leverage"] or 1.0
-        pnl = roi = None
-        if margin:
-            move = (
-                (exit_price - row["entry_price"])
-                if row["direction"] == "long"
-                else (row["entry_price"] - exit_price)
-            )
-            pnl = round(move / row["entry_price"] * margin * leverage, 2)
-            roi = round(pnl / margin * 100.0, 2)
         cursor = conn.execute(
             "INSERT INTO trades"
             " (symbol, direction, timeframe, entry_price, exit_price, size,"
@@ -523,7 +527,7 @@ def close_open_trade(
                 mood,
                 row["screenshot"],
                 row["market"],
-                row["leverage"],  # NULL (skipped) keeps the history neutral
+                None,  # leverage is retired — the column stays for old rows
                 row["risk_percent"],
                 row["take_profit"],
                 row["stop_loss"],

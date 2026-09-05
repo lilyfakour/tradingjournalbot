@@ -36,7 +36,6 @@ _HEADERS = [
     "Take profit",
     "Stop loss",
     "Result",
-    "Leverage",
     "Margin",
     "Risk %",
     "P&L",
@@ -46,7 +45,7 @@ _HEADERS = [
     "Notes",
     "Logged at",
 ]
-_WIDTHS = [7, 12, 9, 10, 10, 10, 11, 11, 10, 6, 9, 12, 8, 12, 8, 18, 12, 40, 19]
+_WIDTHS = [7, 12, 9, 10, 10, 10, 11, 11, 10, 6, 12, 8, 12, 8, 18, 12, 40, 19]
 
 
 def build_workbook(path: Path, rows: list) -> None:
@@ -78,7 +77,6 @@ def build_workbook(path: Path, rows: list) -> None:
             row["take_profit"],
             row["stop_loss"],
             row["hit"] or "",
-            row["leverage"],
             row["size"],
             row["risk_percent"],
             row["pnl"],
@@ -96,10 +94,10 @@ def build_workbook(path: Path, rows: list) -> None:
         for col, value in enumerate(values, start=1):
             cell = ws.cell(row=r, column=col, value=value)
             if col in (
-                6, 7, 8, 9, 11, 12, 13, 14, 15
-            ):  # prices, leverage, margin, risk, P&L, ROI
+                6, 7, 8, 9, 11, 12, 13, 14
+            ):  # prices, margin, risk, P&L, ROI
                 cell.number_format = "0.####"
-            if col == 16:
+            if col == 15:
                 cell.number_format = "@"
 
     wb.save(path)

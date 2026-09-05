@@ -29,6 +29,7 @@ class StubBot(Bot):
         super().__init__(token="123456:TESTTOKEN")
         self._sent = []
         self._deleted = []   # message ids deleted (question messages)
+        self._edited = []    # (message_id, new_text) pairs of in-place edits
 
     @property
     def sent(self):
@@ -42,6 +43,10 @@ class StubBot(Bot):
     def deleted(self):
         return self._deleted
 
+    @property
+    def edited(self):
+        return self._edited
+
     async def send_message(self, chat_id=None, text=None, **kw):
         self._n = getattr(self, "_n", 500) + 1
         msg = Message(
@@ -53,6 +58,26 @@ class StubBot(Bot):
         msg.set_bot(self)
         self._sent.append(text)
         return msg
+
+    async def edit_message_text(
+        self, text=None, chat_id=None, message_id=None, **kw
+    ):
+        """Morph an existing message in place (returns the Message object)."""
+        msg = Message(
+            message_id=message_id,
+            date=datetime.now(),
+            chat=Chat(id=chat_id or 0, type=Chat.PRIVATE),
+            text=text,
+        )
+        msg.set_bot(self)
+        self._edited.append((message_id, text))
+        return msg
+
+    async def edit_message_reply_markup(
+        self, reply_markup=None, chat_id=None, message_id=None, **kw
+    ):
+        self._edited.append((message_id, None))
+        return True
 
     async def delete_message(self, chat_id=None, message_id=None, **kw):
         self._deleted.append(message_id)
@@ -158,7 +183,8 @@ async def main():
 
     # 4) full close chain through the REAL conversation — regression for the
     #    mood bug (ask_close_reason used to return the /trade MOOD state,
-    #    which left the close conversation unroutable).
+    #    which left the close conversation unroutable) AND for the new
+    #    "no leverage, type the dollar result" model.
     async def step(text, oid):
         m = Message(
             message_id=oid, date=datetime.now(), chat=chat, from_user=user,
@@ -174,37 +200,43 @@ async def main():
         await cconv.handle_update(u, app, r, cx)
         return cconv._conversations.get((user.id, user.id))
 
-    assert await step("✅ Win (TP)", 11) == journal.CLOSE_DATE
-    assert await step("2026-09-04", 12) == journal.CLOSE_HOUR
-    assert await step("الان", 13) == journal.CLOSE_PHOTOS
-    assert await step("⏭ بدون اسکرین‌شات", 14) == journal.CLOSE_REASON
-    state_after_reason = await step("TP tapped, momentum gone", 15)
+    assert await step("✅ Win (TP)", 11) == journal.CLOSE_AMOUNT
+    assert await step("37.5", 12) == journal.CLOSE_DATE
+    assert await step("2026-09-04", 13) == journal.CLOSE_HOUR
+    assert await step("الان", 14) == journal.CLOSE_PHOTOS
+    assert await step("⏭ بدون اسکرین‌شات", 15) == journal.CLOSE_REASON
+    state_after_reason = await step("TP tapped, momentum gone", 16)
     assert state_after_reason == journal.CLOSE_MOOD, state_after_reason
     print("PASS  reason -> CLOSE_MOOD through the real conversation (mood bug fixed)")
-    state_after_mood = await step("آرام", 16)
+    state_after_mood = await step("آرام", 17)
     assert state_after_mood == journal.CLOSE_CONFIRM, state_after_mood
     print("PASS  mood -> CLOSE_CONFIRM through the real conversation")
-    state_after_save = await step("✅ ثبت", 17)
+    state_after_save = await step("✅ ثبت", 18)
     assert state_after_save is None, state_after_save
     closed = db.get_recent(1)[0]
     assert closed["hit"] == "win" and closed["symbol"] == "BTCUSD", dict(closed)
-    print("PASS  confirm -> saved into history, conversation ended")
+    # The typed dollar amount (37.5) is stored EXACTLY as given — no
+    # margin/leverage math anywhere.
+    assert closed["pnl"] == 37.5, dict(closed)
+    print("PASS  confirm -> saved into history with the typed P&L (37.5 $)")
 
     # 5) the recent-detail card of the just-closed two-phase trade renders —
     #    regression for the reported "click on a two-phase trade does nothing".
     detail = journal._recent_detail_text(closed)
-    assert "مارجین: —" in detail and "سود و زیان: <b>—</b>" in detail, detail
+    assert "سود و زیان: <b>+$37.50</b>" in detail, detail
     assert "دلیل ورود" in detail and "دلیل خروج" in detail, detail
+    assert "اهرم" not in detail, detail
     print("PASS  recent detail of the two-phase trade renders (NULL-safe)")
 
-    # 6) budget feature: an open trade WITH a margin closed through the real
-    #    conversation stores real P&L/ROI (margin × price-move), not NULL.
+    # 6) close with a margin on the open trade -> ROI = pnl / margin; the
+    #    budget shifts by the typed P&L; BE skips the amount question.
     oid2 = db.add_open_trade(
         symbol="ETHUSD", direction="short", market="crypto", timeframe="15m",
         reason="probe", screenshot=None, trade_date="2026-09-04",
         entry_time="11:00", risk_percent=2.0, entry_price=3000.0,
-        take_profit=2900.0, stop_loss=3100.0, margin=50.0, leverage=10.0,
+        take_profit=2900.0, stop_loss=3100.0, margin=50.0,
     )
+    db.set_budget(500.0)
     upd6 = tap(stub, user, chat, f"opn:c:{oid2}", 20)
     r6 = cconv.check_update(upd6)
     assert r6, "🏁 tap for the margin trade did not match"
@@ -212,26 +244,49 @@ async def main():
     await ctx6.refresh_data()
     await cconv.handle_update(upd6, app, r6, ctx6)
     assert ctx6.user_data.get("open_margin") == 50.0, ctx6.user_data
-    assert ctx6.user_data.get("open_leverage") == 10.0, ctx6.user_data
-    assert await step("✅ Win (TP)", 21) == journal.CLOSE_DATE
-    assert await step("2026-09-04", 22) == journal.CLOSE_HOUR
-    assert await step("الان", 23) == journal.CLOSE_PHOTOS
-    assert await step("⏭ بدون اسکرین‌شات", 24) == journal.CLOSE_REASON
-    assert await step("TP tapped", 25) == journal.CLOSE_MOOD
-    assert await step("آرام", 26) == journal.CLOSE_CONFIRM
-    assert await step("✅ ثبت", 27) is None
+    assert await step("✅ Win (TP)", 21) == journal.CLOSE_AMOUNT
+    assert await step("16.67", 22) == journal.CLOSE_DATE
+    assert await step("2026-09-04", 23) == journal.CLOSE_HOUR
+    assert await step("الان", 24) == journal.CLOSE_PHOTOS
+    assert await step("⏭ بدون اسکرین‌شات", 25) == journal.CLOSE_REASON
+    assert await step("TP tapped", 26) == journal.CLOSE_MOOD
+    assert await step("آرام", 27) == journal.CLOSE_CONFIRM
+    assert await step("✅ ثبت", 28) is None
     closed2 = db.get_recent(1)[0]
-    # short 3000 -> 2900, 50 margin, 10x leverage:
-    # (3000-2900)/3000*50*10 = 16.67 USD, ROI from the rounded pnl: 33.34 %
-    assert closed2["pnl"] == 16.67 and closed2["roi"] == 33.34, dict(closed2)
-    assert closed2["size"] == 50.0 and closed2["leverage"] == 10.0, dict(closed2)
-    print("PASS  margin-aware close stores real P&L/ROI (16.67 $ / 33.34 %)")
+    # The typed 16.67 $ is stored as-is; ROI derives from it and the margin.
+    assert closed2["pnl"] == 16.67, dict(closed2)
+    assert closed2["roi"] == 33.34, dict(closed2)
+    assert closed2["size"] == 50.0, dict(closed2)
+    assert closed2["leverage"] is None, dict(closed2)
+    print("PASS  margin-aware close stores the typed P&L + ROI (16.67 $ / 33.34 %)")
+    # Budget moved by the typed P&L: it was set to 500 $ after the first
+    # close, so only this close's 16.67 counts: 500 + 16.67 = 516.67.
+    assert db.get_budget() == 516.67, db.get_budget()
+    print("PASS  budget shifted by the typed P&L (500 -> 516.67 $)")
 
-    detail2 = journal._recent_detail_text(closed2)
-    assert "مارجین: 50" in detail2, detail2
-    assert "+$16.67" in detail2 and "+33.34%" in detail2, detail2
-    assert "10x" in detail2, detail2
-    print("PASS  detail card shows the real margin, leverage and P&L")
+    # 6b) BE close: the amount question is skipped entirely.
+    oid3 = db.add_open_trade(
+        symbol="XAUUSD", direction="long", market="forex", timeframe="5m",
+        reason="probe", screenshot=None, trade_date="2026-09-04",
+        entry_time="12:00", risk_percent=1.0, entry_price=2500.0,
+        take_profit=2520.0, stop_loss=2480.0,
+    )
+    upd_be = tap(stub, user, chat, f"opn:c:{oid3}", 30)
+    r_be = cconv.check_update(upd_be)
+    assert r_be
+    cx_be = app.context_types.context.from_update(upd_be, app)
+    await cx_be.refresh_data()
+    await cconv.handle_update(upd_be, app, r_be, cx_be)
+    assert await step("➖ BE", 31) == journal.CLOSE_DATE, "BE must skip the amount"
+    assert await step("2026-09-04", 32) == journal.CLOSE_HOUR
+    assert await step("⏭ رد کردن", 33) == journal.CLOSE_PHOTOS
+    assert await step("⏭ بدون اسکرین‌شات", 34) == journal.CLOSE_REASON
+    assert await step("دست نزدم بهش", 35) == journal.CLOSE_MOOD
+    assert await step("مطمئن", 36) == journal.CLOSE_CONFIRM
+    assert await step("✅ ثبت", 37) is None
+    closed3 = db.get_recent(1)[0]
+    assert closed3["pnl"] == 0.0 and closed3["hit"] == "be", dict(closed3)
+    print("PASS  BE close skips the amount question and stores 0.0 $")
 
     # 7) the /trade flow through INLINE taps — the new primary interaction
     #    (menu entry, per-tap question deletion, inline cancel).
@@ -260,7 +315,7 @@ async def main():
     st, cx = await tstep(None, 32, text="EURUSD")
     assert st == journal.DIRECTION, st
     st, cx = await tstep("q:📈 Long", 33)
-    assert st == journal.LEVERAGE, st
+    assert st == journal.TIMEFRAME, st
     print("PASS  typed symbol and 📈 Long tap route through real dispatch")
 
     st, cx = await tstep("q:cancel", 34)
@@ -303,20 +358,53 @@ async def main():
 
     await run_start_full(start_up(40))
     assert any("👋" in t for t in stub.sent), "menu text not sent"
-    # the one-time reply-bar-removal confirmation went out
-    assert any("رابط جدید" in t for t in stub.sent), stub.sent
-    print("PASS  /start -> inline menu sent (HTML-safe) + stale bar removed")
+    # the one-time reply-bar killer went out silently ("…") and was deleted
+    assert not any("رابط جدید" in t for t in stub.sent), stub.sent
+    print("PASS  /start -> inline menu sent (HTML-safe) + silent bar removal")
 
     n = len(stub.sent)
+    n_edits = len(stub.edited)
     await run_start_full(start_up(41))
     added = stub.sent[n:]
-    assert not any("رابط جدید" in t for t in added), added
-    assert any("👋" in t for t in added), added
-    print("PASS  second /start re-sends the menu without the cleanup message")
+    # Second /start EDITS the existing menu message in place (morph) —
+    # no duplicate menu message is stacked into the chat.
+    assert not added, added
+    assert len(stub.edited) > n_edits, stub.edited
+    print("PASS  second /start morphs the menu message in place (no re-send)")
+
+    # 10) the morphing-screen navigation: settings -> budget -> 🔙 back to
+    # settings -> 🏠 home — ALL via in-place edits of ONE message (regression
+    # for the "delete + re-send" menu navigation the trader complained about).
+    nav_ctx = app.context_types.context.from_update(start_up(42), app)
+    await nav_ctx.refresh_data()
+    await journal._send_settings_screen(start_up(42), nav_ctx)
+    settings_mid = nav_ctx.user_data["_screens"][journal._SCREEN_NAV_KEY]
+    await journal._send_budget_screen(start_up(42), nav_ctx)
+    # Same message id — the budget screen MORPHED the settings message.
+    assert (
+        nav_ctx.user_data["_screens"][journal._SCREEN_NAV_KEY] == settings_mid
+    ), nav_ctx.user_data["_screens"]
+    nav_upd = tap(stub, user, chat, "nav:back", 43)
+    nres = journal.build_nav_callbacks().check_update(nav_upd)
+    assert nres, "nav:back tap not routed"
+    nctx = app.context_types.context.from_update(nav_upd, app)
+    await nctx.refresh_data()
+    await journal.on_nav_callback(nav_upd, nctx)
+    assert any(
+        mid == settings_mid and "تنظیمات" in (txt or "")
+        for mid, txt in stub.edited
+    ), stub.edited
+    nav_upd2 = tap(stub, user, chat, "nav:home", 44)
+    nctx2 = app.context_types.context.from_update(nav_upd2, app)
+    await nctx2.refresh_data()
+    await journal.on_nav_callback(nav_upd2, nctx2)
+    assert settings_mid in stub.deleted, stub.deleted
+    print("PASS  🔙 re-renders the previous screen, 🏠 returns home (morph, not re-send)")
 
     # 9) bot.py's real handler registration + post_init must EXECUTE cleanly
     # (regression: a missing import only exploded at startup — invisible to
-    # py_compile and to plain module imports).
+    # py_compile and to plain module imports). The ☰ Menu button must be
+    # registered with the full command list again.
     import bot as bot_module
 
     app2 = (
@@ -329,10 +417,10 @@ async def main():
     registered = sum(len(g) for g in app2.handlers.values())
     assert registered >= 10, registered
     await bot_module.post_init(app2)
-    assert stub._commands == [], stub._commands
+    assert stub._commands and stub._commands[0].command == "start", stub._commands
     print(
         f"PASS  bot.py: {registered} handlers registered, "
-        "legacy command menu cleared"
+        f"☰ Menu button with {len(stub._commands)} commands"
     )
 
     print("ALL PROBES PASSED")

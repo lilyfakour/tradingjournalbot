@@ -5,17 +5,23 @@ Every choice is offered as an INLINE BUTTON attached to the bot's own message �
 each question message is deleted the moment it is answered, so the chat reads
 like a clean step-by-step menu. Typed answers still work everywhere. The main
 menu (sent by /start) is a welcome message with inline buttons that stays in
-place; secondary screens (⚙️ settings, stats/recent/open panels) carry a
-🔙 بازگشت row that deletes the screen and shows the menu again. A chart
-screenshot can be attached near the end of the questionnaire and is later
-reachable through the 📷 button on the trade's detail card in /recent.
+place; every secondary screen (⚙️ settings, 💰 budget, stats/recent/open
+panels and the stats symbol picker) is ONE morphing message per chat that is
+EDITED in place as the trader navigates — 🔙 goes one level back, 🏠 returns
+straight to the main menu. A chart screenshot can be attached near the end of
+the questionnaire and is later reachable through the 📷 button on the trade's
+detail card in /recent.
+
+P&L is the trader's typed dollar result: the result question (✅ Win / ❌ Loss /
+➖ BE) only signs it. No leverage anywhere; Margin is optional (⏭ skip) and
+feeds ROI plus the live budget in ⚙️ تنظیمات.
 
 Open trades work in two phases: the 🟢 open-trades questionnaire (market,
-symbol, side, timeframe, reason, screenshot, date, time, risk, entry, TP, SL)
-stores a running position in db.open_trades; when it closes, the trader taps
-it in the 🟢 panel and fills a second short questionnaire (status, exit date,
-time, price, up to 4 exit screenshots, reason, mood) which moves it into the
-normal closed-trades history.
+symbol, side, timeframe, reason, screenshot, date, time, risk, margin,
+entry, TP, SL) stores a running position in db.open_trades; when it closes,
+the trader taps it in the 🟢 panel and fills a second short questionnaire
+(status, dollar result, exit date, time, price, up to 4 exit screenshots,
+reason, mood) which moves it into the normal closed-trades history.
 """
 
 from __future__ import annotations
@@ -58,12 +64,12 @@ logger = logging.getLogger(__name__)
     MARKET,
     SYMBOL,
     DIRECTION,
-    LEVERAGE,
     TIMEFRAME,
     ENTRY,
     TAKE_PROFIT,
     STOP_LOSS,
     RESULT,
+    PNL_AMOUNT,
     MARGIN,
     RISK,
     TRADE_DATE,
@@ -81,7 +87,6 @@ logger = logging.getLogger(__name__)
     OPEN_MARKET,
     OPEN_SYMBOL,
     OPEN_DIRECTION,
-    OPEN_LEVERAGE,
     OPEN_TIMEFRAME,
     OPEN_REASON,
     OPEN_SCREENSHOT,
@@ -93,12 +98,13 @@ logger = logging.getLogger(__name__)
     OPEN_TAKE_PROFIT,
     OPEN_STOP_LOSS,
     OPEN_CONFIRM,
-) = range(100, 115)
+) = range(100, 114)
 
 # States of the close-an-open-trade questionnaire (started from the 🏁 button
 # on an open trade's detail card — the open trade id travels in user_data).
 (
     CLOSE_STATUS,
+    CLOSE_AMOUNT,
     CLOSE_DATE,
     CLOSE_HOUR,
     CLOSE_PRICE,
@@ -106,7 +112,7 @@ logger = logging.getLogger(__name__)
     CLOSE_REASON,
     CLOSE_MOOD,
     CLOSE_CONFIRM,
-) = range(200, 208)
+) = range(200, 209)
 
 _TEXT = filters.TEXT & ~filters.COMMAND
 _CANCEL_RE = re.compile(
@@ -165,45 +171,90 @@ _Q_CANCEL_CB_RE = re.compile(r"^q:cancel$")
 # the conversation fallback, not to the step parser).
 _Q_CB_RE = re.compile(r"^q:(?!cancel)")
 _BACK_FLOW_ROW = [InlineKeyboardButton("🔙 بازگشت", callback_data="nav:back:flow")]
-_BACK_MAIN_ROW = [InlineKeyboardButton("🔙 بازگشت", callback_data="nav:back:main")]
-_BACK_SETTINGS_ROW = [
-    InlineKeyboardButton("🔙 بازگشت", callback_data="nav:back:settings")
+# Screen navigation: 🔙 = one level back, 🏠 = straight to the main menu.
+_BACK_NAV_ROW = [
+    InlineKeyboardButton("🔙", callback_data="nav:back"),
+    InlineKeyboardButton("🏠", callback_data="nav:home"),
 ]
-_SETTINGS_CB_RE = re.compile(r"^(?:q:💰 بودجه|nav:back:(?:main|settings))$")
-_BACK_SETTINGS_CB = "nav:back:settings"
+_HOME_NAV_ROW = [InlineKeyboardButton("🏠", callback_data="nav:home")]
+_NAV_CB_RE = re.compile(r"^nav:(?:back|home)$")
 
-# Leverage / timeframe quick choices (inline rows).
-_LEV_BUTTONS = [
-    ["×2", "×3", "×5"],
-    ["×10", "×20", "×50"],
-    ["×100", "×125", "⏭ بدون اهرم"],
-]
 _TF_BUTTONS = [["1m", "5m", "15m"], ["30m", "1h", "4h"], ["1D", "1W", "1M"]]
-
-
-def _lev_keyboard() -> InlineKeyboardMarkup:
-    """Leverage quick-choice rows (inline, with skip + cancel)."""
-    return _ik(_LEV_BUTTONS + [_CANCEL_IK_ROW])
 
 
 _SHOT_KEYBOARD = _ik([["⏭ بدون اسکرین‌شات"], _CANCEL_IK_ROW])
 
 
-async def _show_screen(
+# ---------------------------------------------------------------------------
+# Morphing-screen navigation
+#
+# The main menu is one persistent message. Every secondary screen (⚙️ settings,
+# 💰 budget, 📊 stats, 🕘 recent, 🟢 open trades) is a SINGLE message per chat
+# that is EDITED in place when the trader drills into a sub-screen and back —
+# nothing is deleted and re-sent while navigating. `_nav` (user_data) holds the
+# content stack so 🔙 can re-render exactly the previous level, 🏠 jumps
+# straight back to the main menu, and the main-menu message never moves.
+# ---------------------------------------------------------------------------
+
+_MAIN_NAV_KEY = "main"
+_SCREEN_NAV_KEY = "screen"
+
+
+def _nav_stack(context: ContextTypes.DEFAULT_TYPE) -> list:
+    return context.user_data.setdefault("_nav", [])
+
+
+def _nav_update_top(
+    context: ContextTypes.DEFAULT_TYPE,
+    key: str,
+    text: str,
+    markup: InlineKeyboardMarkup,
+) -> None:
+    """Keep the nav stack's top entry in sync after an in-place edit."""
+    nav = _nav_stack(context)
+    if not nav or nav[-1].get("key") != key:
+        nav[:] = [e for e in nav if e.get("key") != key]
+        nav.append({"key": key, "text": text, "kb": markup})
+    else:
+        nav[-1]["text"] = text
+        nav[-1]["kb"] = markup
+
+
+def _nav_prune(context: ContextTypes.DEFAULT_TYPE, *keys: str) -> None:
+    """Drop the given keys from the nav stack (they are no longer shown)."""
+    _nav_stack(context)[:] = [
+        e for e in _nav_stack(context) if e.get("key") not in keys
+    ]
+
+
+def _screen_msg_id(context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
+    """The message id of the current morphing screen (None if not sent)."""
+    return (context.user_data.get("_screens") or {}).get(_SCREEN_NAV_KEY)
+
+
+async def _edit_or_send(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
     key: str,
     text: str,
     markup: InlineKeyboardMarkup,
 ) -> None:
-    """Send a screen message, deleting any stale copy of the same screen."""
+    """Edit the morphing screen message in place (send it if it is gone)."""
     screens = context.user_data.setdefault("_screens", {})
-    old = screens.pop(key, None)
-    if old:
+    mid = screens.get(key)
+    if mid:
         try:
-            await context.bot.delete_message(chat_id, old)
+            await context.bot.edit_message_text(
+                text,
+                chat_id=chat_id,
+                message_id=mid,
+                reply_markup=markup,
+                parse_mode=ParseMode.HTML,
+            )
+            return
         except Exception:
-            logger.info("Stale %s screen message could not be deleted.", key)
+            logger.info("%s screen message is gone; sending a fresh one.", key)
+    screens.pop(key, None)
     msg = await context.bot.send_message(
         chat_id, text, reply_markup=markup, parse_mode=ParseMode.HTML
     )
@@ -223,12 +274,100 @@ async def _drop_screen_message(
             logger.info("%s screen message could not be deleted.", key)
 
 
+async def _show_screen(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    key: str,
+    text: str,
+    markup: InlineKeyboardMarkup,
+) -> None:
+    """Show a screen. The main menu owns its own message; every other
+    screen morphs the single secondary-screen message (edit in place)."""
+    if key == _MAIN_NAV_KEY:
+        screens = context.user_data.setdefault("_screens", {})
+        old = screens.pop(key, None)
+        if old:
+            try:
+                await context.bot.edit_message_text(
+                    text,
+                    chat_id=chat_id,
+                    message_id=old,
+                    reply_markup=markup,
+                    parse_mode=ParseMode.HTML,
+                )
+                screens[key] = old
+                return
+            except Exception:
+                logger.info("Stale main-menu message could not be edited.")
+        msg = await context.bot.send_message(
+            chat_id, text, reply_markup=markup, parse_mode=ParseMode.HTML
+        )
+        screens[key] = msg.message_id
+        return
+    # A secondary screen: push it onto the content stack and morph.
+    nav = _nav_stack(context)
+    nav[:] = [entry for entry in nav if entry.get("key") != key]
+    nav.append({"key": key, "text": text, "kb": markup})
+    await _edit_or_send(context, chat_id, _SCREEN_NAV_KEY, text, markup)
+
+
+async def _screen_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """🔙 — go exactly one level back (re-render the previous screen content).
+
+    The morphing message is edited in place; when the stack empties the
+    message is removed and the (persistent) main menu is refreshed.
+    """
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id
+    nav = _nav_stack(context)
+    if nav:
+        nav.pop()
+    if nav:
+        top = nav[-1]
+        await _edit_or_send(
+            context, chat_id, _SCREEN_NAV_KEY, top["text"], top["kb"]
+        )
+        return
+    await _drop_screen_message(context, chat_id, _SCREEN_NAV_KEY)
+    await _ensure_menu(update, context)
+
+
+async def _screen_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """🏠 — drop every secondary screen and re-show the main menu."""
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id
+    _nav_stack(context).clear()
+    await _drop_screen_message(context, chat_id, _SCREEN_NAV_KEY)
+    await _ensure_menu(update, context)
+
+
+async def on_nav_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """🔙 / 🏠 taps coming from any screen message."""
+    data = update.callback_query.data or ""
+    if data == "nav:home":
+        await _screen_home(update, context)
+    else:
+        await _screen_back(update, context)
+
+
+def build_nav_callbacks() -> CallbackQueryHandler:
+    """Handler for the 🔙 / 🏠 buttons of every screen message."""
+    return CallbackQueryHandler(on_nav_callback, pattern=_NAV_CB_RE)
+
+
 def _reset_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Clear the flow draft but keep the screen bookkeeping (_screens)."""
+    """Clear the flow draft but keep the screen bookkeeping (_screens, _nav)."""
     screens = context.user_data.get("_screens")
+    nav = context.user_data.get("_nav")
     context.user_data.clear()
     if screens is not None:
         context.user_data["_screens"] = screens
+    if nav is not None:
+        context.user_data["_nav"] = nav
 
 
 def _cb_text_update(update: Update, text: str) -> Update:
@@ -323,22 +462,6 @@ def _tap_step(fn):
     return _wrapped
 
 
-async def on_back_main(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """🔙 بازگشت on a secondary screen — back to the main menu.
-
-    Level-1 back: the screen message goes away and the main-menu message is
-    shown again (freshly, if its message is gone).
-    """
-    query = update.callback_query
-    await query.answer()
-    chat_id = update.effective_chat.id
-    await _drop_screen_message(context, chat_id, "settings")
-    await _drop_screen_message(context, chat_id, "budget")
-    await _ensure_menu(update, context)
-
-
 def _build_keyboards() -> None:
     """(Re)build the inline keyboards (import time, after the primitives)."""
     global _DIR_KEYBOARD, _TF_KEYBOARD, _CONFIRM_KEYBOARD, _STATUS_KEYBOARD
@@ -348,7 +471,7 @@ def _build_keyboards() -> None:
     _STATUS_KEYBOARD = _ik(
         [
             ["✅ Win (TP)", "❌ Loss (SL)"],
-            ["➖ BE", "✏️ Manual"],
+            ["➖ BE", "✏️ دستی"],
             _CANCEL_IK_ROW,
         ]
     )
@@ -361,17 +484,14 @@ _build_keyboards()
 # Main menu — a welcome MESSAGE with inline buttons (sent by /start).
 # --------------------------------------------------------------------------
 MENU_TEXT = (
-    "📈 /trade — ثبت معاملهٔ بسته‌شده (بعد از خروج از معامله)\n"
-    "🟢 /open — ثبت معاملهٔ باز (معامله‌ای که همین الان در آن هستی)\n"
-    "🟢 /opens — معاملات باز: دیدن، بستن یا حذف معامله‌های جاری\n"
-    "🕘 /recent — معاملات اخیر، صفحه‌بندی‌شده (۱۰ تای آخر در هر صفحه)\n"
-    "📊 /stats — آمار عملکرد؛ فیلتر بازه زمانی و نماد با دکمه‌های داخل پیام\n"
-    "⚙️ /settings — تنظیمات؛ بودجهٔ حساب (USD) برای محاسبهٔ مارجین و ریسک\n"
-    "📥 /export — دریافت همه معاملات به‌صورت فایل اکسل\n"
-    "🗑 /delete شماره — حذف یک معامله\n"
-    "✖️ /cancel — لغو ثبت جاری\n\n"
-    "برای شروع یکی از دکمه‌های زیر را بزنید؛ در هر مرحله می‌توانید به‌جای "
-    "دکمه، پاسخ را تایپ کنید."
+    "📈 ثبت معامله بسته — بعد از خروج از معامله\n"
+    "🟢 ثبت معامله باز — معامله‌ای که همین الان در آن هستی\n"
+    "🟢 معاملات باز — دیدن، بستن یا حذف معامله‌های جاری\n"
+    "🕘 معاملات اخیر — با جزئیات کامل هر معامله\n"
+    "📊 آمار — عملکرد کلی با فیلتر بازه و نماد\n"
+    "⚙️ تنظیمات — بودجهٔ حساب (USD)\n\n"
+    "در هر صفحه: 🔙 یک مرحله عقب، 🏠 بازگشت به همین منو. "
+    "به‌جای دکمه‌ها می‌توانی جواب را تایپ کنی."
 )
 
 # The main menu is a MESSAGE with inline buttons (no reply bar anymore).
@@ -422,8 +542,10 @@ _SKIP_SHOT_TOKENS = _SKIP_TOKENS | {
 _NOW_TOKENS = {"now", "الان", "🕐 الان"}
 _SKIP_HOUR_TOKENS = _SKIP_TOKENS
 _SKIP_MOOD_TOKENS = _SKIP_TOKENS
-_SKIP_LEV_TOKENS = _SKIP_TOKENS | {"بدون اهرم", "⏭ بدون اهرم"}
 _SKIP_RISK_TOKENS = _SKIP_TOKENS | {"بدون درصد", "⏭ بدون درصد"}
+# The margin question is skippable (the trader may not want to record it).
+_SKIP_MARGIN_BTN = "⏭ رد کردن"
+_SKIP_MARGIN_TOKENS = _SKIP_TOKENS | {_SKIP_MARGIN_BTN}
 _MARKET_CRYPTO_TOKENS = {
     "crypto",
     "کریپتو",
@@ -528,11 +650,11 @@ _RISK_KEYBOARD = _ik([["0.5%", "1%", "2%"], ["3%", "5%", "10%"], ["⏭ بدون 
 # margin from the configured budget and the risk % entered a step earlier.
 MARGIN_AUTO_BTN = "🧮 محاسبه خودکار"
 MARGIN_AUTO_FIX_BTN = "✅ پیشنهاد ربات"
-MARGIN_KEEP_BTN = "✍️ عدد خودم"
-_OPEN_MARGIN_KEYBOARD = _ik([[MARGIN_AUTO_BTN], _CANCEL_IK_ROW])
-_MARGIN_CONFLICT_KEYBOARD = _ik(
-    [[MARGIN_AUTO_FIX_BTN, MARGIN_KEEP_BTN], _CANCEL_IK_ROW]
+_SKIP_OPEN_MARGIN_ROW = [[_SKIP_MARGIN_BTN]]
+_OPEN_MARGIN_KEYBOARD = _ik(
+    [[MARGIN_AUTO_BTN], [_SKIP_MARGIN_BTN], _CANCEL_IK_ROW]
 )
+_MARGIN_CONFLICT_KEYBOARD = _ik([[MARGIN_AUTO_FIX_BTN], _CANCEL_IK_ROW])
 
 
 def _symbol_keyboard() -> Optional[InlineKeyboardMarkup]:
@@ -596,8 +718,8 @@ async def show_menu(
 ) -> None:
     """Send the welcome text and the inline main menu (also /start).
 
-    Tracked as the "main" screen so a re-send replaces a stale copy instead
-    of stacking duplicate menus.
+    Tracked as the "main" screen so a re-send EDITS the same menu message
+    instead of stacking duplicate menus.
     """
     user = getattr(update, "effective_user", None)
     name = (getattr(user, "first_name", "") or "").strip()
@@ -605,16 +727,16 @@ async def show_menu(
         f"سلام {html.escape(name)}! 👋\n\n" if name else "سلام! 👋\n\n"
     )
     # The old UI's persistent reply-keyboard bar keeps living on the user's
-    # client until a message asks Telegram to remove it — the first menu of
-    # a session does that once, then the flag stops the extra message.
+    # client until a message asks Telegram to remove it. One silent message
+    # per session does that — sent and instantly deleted, so nothing shows.
     if not context.user_data.get("_reply_bar_cleared"):
         context.user_data["_reply_bar_cleared"] = True
+        chat_id = update.effective_chat.id
         try:
-            await update.effective_chat.send_message(
-                "✅ رابط جدید فعال شد — دکمه‌های قدیمی زیر صفحهٔ ورودی حذف "
-                "شدند؛ از این به بعد همه‌چیز داخل همین پیام‌هاست.",
-                reply_markup=_MENU_KILLER,
+            killer = await update.effective_chat.send_message(
+                "…", reply_markup=_MENU_KILLER
             )
+            await context.bot.delete_message(chat_id, killer.message_id)
         except Exception:
             logger.info("Stale reply bar could not be removed.")
     await _show_screen(
@@ -721,16 +843,14 @@ async def _send_settings_screen(
         update.effective_chat.id,
         "settings",
         "⚙️ <b>تنظیمات</b>\n\n" + body,
-        _ik([["💰 بودجه"], _BACK_MAIN_ROW]),
+        _ik([["💰 بودجه"], _BACK_NAV_ROW]),
     )
 
 
 async def _send_budget_screen(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """💰 بودجه screen — drills into settings (the settings screen goes)."""
-    chat_id = update.effective_chat.id
-    await _drop_screen_message(context, chat_id, "settings")
+    """💰 بودجه screen — drills into settings (morphs the same message)."""
     budget = db.get_budget()
     current = f"{_fmt_num(budget)} $" if budget else "—"
     # Arm the free-number listener (expires, see _budget_armed below): the
@@ -738,44 +858,29 @@ async def _send_budget_screen(
     context.user_data["_budget_prompt"] = datetime.now().timestamp()
     await _show_screen(
         context,
-        chat_id,
+        update.effective_chat.id,
         "budget",
         f"💰 <b>بودجهٔ فعلی: {current}</b>\n\n"
         "عدد بودجه را به دلار بفرستید (مثلاً 500 یا 1250.50) "
         "یا «حذف» برای پاک کردن:",
-        _ik([_BACK_SETTINGS_ROW]),
+        _ik([_BACK_NAV_ROW]),
     )
-
-
-async def _settings_go_back(update: Update, context) -> None:
-    """🔙 from 💰 → settings screen; 🔙 from settings → main menu."""
-    chat_id = update.effective_chat.id
-    if update.callback_query.data == _BACK_SETTINGS_CB:
-        await _send_settings_screen(update, context)
-    else:
-        await _drop_screen_message(context, chat_id, "settings")
-        await _ensure_menu(update, context)
 
 
 async def on_settings_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Inline taps of the settings screens (budget + back rows)."""
+    """Inline taps of the settings screens (💰 بودجه)."""
     query = update.callback_query
-    data = query.data or ""
     await query.answer()
-    if data == "q:💰 بودجه":
+    if (query.data or "") == "q:💰 بودجه":
         await _send_budget_screen(update, context)
-    else:
-        await _settings_go_back(update, context)
 
 
 def build_settings_handlers() -> list:
     """Handlers for the settings screens (inline taps + the typed value)."""
     return [
-        CallbackQueryHandler(on_settings_callback, pattern=_SETTINGS_CB_RE),
-        CallbackQueryHandler(on_flow_cancel, pattern=_Q_CANCEL_CB_RE),
-        CallbackQueryHandler(on_back_flow, pattern=r"^nav:back:flow$"),
+        CallbackQueryHandler(on_settings_callback, pattern=r"^q:💰 بودجه$"),
         MessageHandler(filters.Regex(_BUDGET_VALUE_RE), settings_budget_value),
     ]
 
@@ -807,8 +912,7 @@ async def settings_budget_value(
             return  # "حذف" outside the budget prompt means nothing
         context.user_data.pop("_budget_prompt", None)
         db.set_budget(None)
-        await _drop_screen_message(context, update.effective_chat.id, "budget")
-        await _send_settings_screen(update, context)
+        await _back_to_settings(update, context)
         return
     if m.group("explicit"):
         number = _parse_positive(m.group("explicit"))
@@ -826,7 +930,15 @@ async def settings_budget_value(
     context.user_data.pop("_budget_prompt", None)
     db.set_budget(number)
     logger.info("Budget set to %.2f USD", number)
-    await _drop_screen_message(context, update.effective_chat.id, "budget")
+    await _back_to_settings(update, context)
+
+
+async def _back_to_settings(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """After a 💰 answer: morph the screen back into the ⚙️ settings view."""
+    nav = _nav_stack(context)
+    nav[:] = [e for e in nav if e.get("key") not in ("budget", "settings")]
     await _send_settings_screen(update, context)
 
 
@@ -931,34 +1043,27 @@ def _parse_percent(raw: str) -> Optional[float]:
     return number
 
 
-def _pnl_from_hit(data: dict) -> float:
-    """P&L in quote currency from margin, leverage and which level hit.
+def _signed_pnl(data: dict) -> float:
+    """The signed P&L of a draft: ➖ for a loss, 0 for BE, ➕ for a win.
 
-    The position is margin * leverage, so the price move translates into
-    (move / entry) * position — i.e. the margin grows/shrinks by the move
-    scaled with the leverage. A breakeven result (exit == entry) yields 0.
+    The amount is the trader's own input (data["pnl_amount"]); the result
+    question only decides its sign. No margin/leverage math anywhere — what
+    the trader types is exactly what gets stored.
     """
-    if not data.get("exit_price"):
+    amount = data.get("pnl_amount") or 0.0
+    hit = data.get("hit")
+    if hit == "lose":
+        return -abs(amount)
+    if hit == "be":
         return 0.0
-    margin = data["size"]
-    leverage = data.get("leverage") or 1.0
-    move = (
-        (data["exit_price"] - data["entry_price"])
-        if data["direction"] == "long"
-        else (data["entry_price"] - data["exit_price"])
-    )
-    return margin * leverage * (move / data["entry_price"])
+    return abs(amount)
 
 
-def _roi_from_hit(data: dict, pnl: float) -> float:
-    """ROI in percent: P&L relative to the committed margin.
-
-    A leveraged position moves the margin by (move / entry) * leverage, so
-    ROI is simply pnl / margin * 100 — e.g. 10x leverage on a 1% move is
-    +10% ROI. Breakeven trades yield 0%.
-    """
-    margin = data.get("size") or 0
-    return (pnl / margin * 100.0) if margin else 0.0
+def _roi_from_pnl(pnl: float, margin: Optional[float]) -> Optional[float]:
+    """ROI percent from the stored P&L and margin (None when margin-less)."""
+    if not margin:
+        return None
+    return round(pnl / margin * 100.0, 2)
 
 
 def _screenshot_path(name: str) -> Path:
@@ -1003,14 +1108,6 @@ async def _prompt_direction(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return DIRECTION
 
 
-async def _prompt_leverage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await _q_send(update, context,
-        "Leverage — دکمه را بزنید یا عدد بفرستید:",
-        reply_markup=_ik(_LEV_BUTTONS + [_CANCEL_IK_ROW]),
-    )
-    return LEVERAGE
-
-
 async def _prompt_timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await _q_send(update, context,
         "تایم‌فریم (Timeframe):",
@@ -1048,6 +1145,21 @@ async def _prompt_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return RESULT
 
 
+async def _prompt_pnl_amount(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """The dollar amount the trader actually gained or lost — saved as-is."""
+    hit = context.user_data.get("hit")
+    if hit == "win":
+        hint = "چند دلار سود کردی؟ (فقط عدد، مثلاً 120.50)"
+    elif hit == "lose":
+        hint = "چند دلار ضرر کردی؟ (فقط عدد، مثلاً 80)"
+    else:
+        hint = "چند دلار سود یا ضرر کردی؟ (BE معمولاً 0 است)"
+    await _q_send(update, context, f"💵 {hint}")
+    return PNL_AMOUNT
+
+
 async def _prompt_margin(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
@@ -1056,7 +1168,8 @@ async def _prompt_margin(
     else:
         detail = "USDT"
     await _q_send(update, context,
-        f"💰 Margin ({detail}):",
+        f"💰 Margin ({detail}) — دکمهٔ ⏭ رد کردن را بزنید تا خالی بماند:",
+        reply_markup=_ik([[_SKIP_MARGIN_BTN], _CANCEL_IK_ROW]),
     )
     return MARGIN
 
@@ -1114,15 +1227,15 @@ def _result_emoji(hit: Optional[str]) -> str:
 
 def _summary(data: dict) -> str:
     """Render the airy confirmation summary for the current draft (HTML)."""
-    pnl = _pnl_from_hit(data)
-    roi = _roi_from_hit(data, pnl)
+    pnl = _signed_pnl(data)
+    roi = _roi_from_pnl(pnl, data.get("size"))
     hit = data.get("hit") or ""
     emoji = _result_emoji(hit)
     market = data.get("market") or "crypto"
     market_fa = "🪙 کریپتو" if market == "crypto" else "💵 فارکس"
-    lev = data.get("leverage")
     result = _RESULT_LABELS.get(hit, "-")
     risk = data.get("risk_percent")
+    margin = data.get("size")
     shots = []
     if data.get("screenshot"):
         shots.append("قبل")
@@ -1139,8 +1252,7 @@ def _summary(data: dict) -> str:
         f"• Market    {market_fa}\n"
         f"• Symbol    <b>{symbol}</b>\n"
         f"• Side      {_DIR_LABEL.get(data['direction'], data['direction'])}\n"
-        f"• TF·Lev    {data.get('timeframe') or '-'}"
-        f" · {(_fmt_num(lev) + 'x') if lev else '-'}\n"
+        f"• TF        {data.get('timeframe') or '-'}\n"
         f"• Entry     {_fmt_num(data['entry_price'])}   →   "
         f"{_fmt_num(data['exit_price']) if data['exit_price'] else '-'}\n"
         f"• TP / SL   {_fmt_num(data['take_profit']) if data.get('take_profit') else '-'}"
@@ -1148,18 +1260,23 @@ def _summary(data: dict) -> str:
         "\n"
         "◾ <i>نتیجه</i>\n"
         f"• Result    {emoji} {result}\n"
-        f"• Margin    {_fmt_size(data['size'])}"
-        + (f" · Risk {_fmt_num(risk)}%" if risk else "")
+        f"• P&L       <b>{_fmt_pnl(pnl)}</b>"
+        + (f" · ROI {_fmt_roi(roi)}" if roi is not None else "")
         + "\n"
-        f"• Date      {data['trade_date']}\n"
+        + (
+            (
+                "• Margin    " + _fmt_size(margin)
+                + (f" · Risk {_fmt_num(risk)}%" if risk else "")
+                + "\n"
+            )
+            if margin
+            else (f"• Risk    {_fmt_num(risk)}%\n" if risk else "")
+        )
+        + f"• Date      {data['trade_date']}\n"
         + (f"• Mood      {_MOOD_LABELS.get(mood, mood)}\n" if mood else "")
         + (f"• Reason    {notes}\n" if data["notes"] else "")
         + (f"• Shots     {' و '.join(shots)}\n" if shots else "")
         + "\n"
-        "————————————————\n"
-        f"• <i>P&L</i>    <b>{_fmt_pnl(pnl)}</b>\n"
-        f"• <i>ROI</i>    <b>{_fmt_roi(roi)}</b>\n"
-        "\n"
         "ذخیره شود؟"
     )
 
@@ -1189,15 +1306,15 @@ async def _save_and_reply(
     data = dict(context.user_data)
     _reset_flow(context)
     await _drop_screen_message(context, update.effective_chat.id, "flow")
-    pnl = _pnl_from_hit(data)
-    roi = _roi_from_hit(data, pnl)
+    pnl = _signed_pnl(data)
+    roi = _roi_from_pnl(pnl, data.get("size"))
     trade_id = db.add_trade(
         symbol=data["symbol"],
         direction=data["direction"],
         timeframe=data.get("timeframe") or "",
         entry_price=data["entry_price"],
         exit_price=data["exit_price"],
-        size=data["size"],
+        size=data.get("size"),
         pnl=pnl,
         trade_date=data["trade_date"],
         notes=data["notes"],
@@ -1205,7 +1322,6 @@ async def _save_and_reply(
         roi=roi,
         screenshot=data.get("screenshot"),
         market=data.get("market") or "crypto",
-        leverage=data.get("leverage"),
         risk_percent=data.get("risk_percent"),
         take_profit=data.get("take_profit"),
         stop_loss=data.get("stop_loss"),
@@ -1214,7 +1330,6 @@ async def _save_and_reply(
     )
     logger.info("Saved trade #%s %s", trade_id, data["symbol"])
     tf = data.get("timeframe") or ""
-    lev = data.get("leverage")
     hit = data.get("hit") or ""
     result = _RESULT_LABELS.get(hit, "-")
     symbol = _ESC(data["symbol"])
@@ -1224,11 +1339,10 @@ async def _save_and_reply(
         f"• <b>{symbol}</b> · "
         f"{_DIR_LABEL.get(data['direction'], data['direction'])}"
         + (f" · {tf}" if tf else "")
-        + (f" · {_fmt_num(lev)}x" if lev else "")
         + "\n"
         f"• Entry: {_fmt_num(data['entry_price'])}"
         f" → {_fmt_num(data['exit_price'])}\n"
-        f"• {result} · Margin {_fmt_size(data['size'])}\n"
+        f"• {result}\n"
         "\n"
         "————————————————\n"
         f"• <i>P&L</i>  <b>{_fmt_pnl(pnl)}</b>\n"
@@ -1268,7 +1382,12 @@ async def _discard(
 async def trade_start(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Start the guided entry with the market question (crypto vs forex)."""
+    """Start the guided entry with the market question (crypto vs forex).
+
+    Any half-finished previous draft (and its dangling question message) is
+    wiped first — flows always start from scratch, never resume.
+    """
+    await _q_drop(update, context)  # remove a dangling question, if any
     _drop_screenshot(context)
     _reset_flow(context)
     await _q_send(
@@ -1346,29 +1465,6 @@ async def ask_direction(
         )
         return DIRECTION
     context.user_data["direction"] = direction
-    return await _prompt_leverage(update, context)
-
-
-async def ask_leverage(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    raw = (update.message.text or "").strip()
-    if raw.lower() in _SKIP_LEV_TOKENS:
-        context.user_data.pop("leverage", None)
-        return await _prompt_timeframe(update, context)
-    text = raw.lower().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
-    text = text.replace("×", "x").replace(" ", "")
-    if text.startswith("x"):
-        text = text[1:]
-    if text.endswith("x"):
-        text = text[:-1]
-    number = _parse_positive(text)
-    if number is None or number > 1000:
-        await update.message.reply_text(
-            "Leverage نامعتبر — عدد بفرستید (مثلاً 10 یا 10x) یا «⏭ بدون اهرم»:"
-        )
-        return LEVERAGE
-    context.user_data["leverage"] = number
     return await _prompt_timeframe(update, context)
 
 
@@ -1446,16 +1542,36 @@ async def ask_result(
             "نتیجه را انتخاب کنید: ✅ Win / ❌ Loss / ➖ BE"
         )
         return RESULT
+    return await _prompt_pnl_amount(update, context)
+
+
+async def ask_pnl_amount(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Store the dollar amount the trader actually gained or lost."""
+    number = _parse_positive(update.message.text or "")
+    if number is None:
+        await update.message.reply_text(
+            "مبلغ نامعتبر — فقط عدد بفرستید (مثلاً 120.50):"
+        )
+        return PNL_AMOUNT
+    context.user_data["pnl_amount"] = number
     return await _prompt_margin(update, context)
 
 
 async def ask_margin(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    number = _parse_positive(update.message.text or "")
+    raw = (update.message.text or "").strip()
+    if raw in _SKIP_MARGIN_TOKENS:
+        # Skipped margin: the draft keeps no size and ROI stays unknown.
+        context.user_data.pop("size", None)
+        return await _prompt_risk(update, context)
+    number = _parse_positive(raw)
     if number is None:
         await update.message.reply_text(
-            "Margin نامعتبر — یک عدد مثبت بفرستید (اعشار با نقطه):"
+            "Margin نامعتبر — یک عدد مثبت بفرستید (اعشار با نقطه) "
+            f"یا {_SKIP_MARGIN_BTN}:"
         )
         return MARGIN
     context.user_data["size"] = number  # 'size' column stores the margin
@@ -1476,8 +1592,6 @@ async def ask_risk(
         )
         return RISK
     context.user_data["risk_percent"] = number
-    # P&L is auto-calculated from margin, leverage and the exit price —
-    # the trader is never asked for it.
     return await _prompt_trade_date(update, context)
 
 
@@ -1683,13 +1797,6 @@ async def on_flow_cancel(
     return ConversationHandler.END
 
 
-async def on_back_flow(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """🔙 on a flow question (✖️ لغو is enough for now — kept for parity)."""
-    await on_flow_cancel(update, context)
-
-
 async def cancel(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
@@ -1727,10 +1834,6 @@ def build_conversation() -> ConversationHandler:
                 CallbackQueryHandler(_tap_step(ask_direction), pattern=_Q_CB_RE),
                 MessageHandler(_ANSWER, _msg_step(ask_direction)),
             ],
-            LEVERAGE: [
-                CallbackQueryHandler(_tap_step(ask_leverage), pattern=_Q_CB_RE),
-                MessageHandler(_ANSWER, _msg_step(ask_leverage)),
-            ],
             TIMEFRAME: [
                 CallbackQueryHandler(_tap_step(ask_timeframe), pattern=_Q_CB_RE),
                 MessageHandler(_ANSWER, _msg_step(ask_timeframe)),
@@ -1750,6 +1853,10 @@ def build_conversation() -> ConversationHandler:
             RESULT: [
                 CallbackQueryHandler(_tap_step(ask_result), pattern=_Q_CB_RE),
                 MessageHandler(_ANSWER, _msg_step(ask_result)),
+            ],
+            PNL_AMOUNT: [
+                CallbackQueryHandler(_tap_step(ask_pnl_amount), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_pnl_amount)),
             ],
             MARGIN: [
                 CallbackQueryHandler(_tap_step(ask_margin), pattern=_Q_CB_RE),
@@ -1949,6 +2056,7 @@ def _stats_panel_kb(flt: dict) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(_STATS_RESET, callback_data=_CB_RESET),
                 InlineKeyboardButton(_STATS_EXPORT, callback_data=_CB_EXPORT),
             ],
+            _BACK_NAV_ROW,
         ]
     )
 
@@ -1977,11 +2085,9 @@ def _symbol_picker_kb(
         ]
     )
     rows.append(
-        [
-            InlineKeyboardButton(_STATS_ALL_SYMBOLS, callback_data=_CB_SALL),
-            InlineKeyboardButton(_STATS_CLOSE, callback_data=_CB_CLOSE),
-        ]
+        [InlineKeyboardButton(_STATS_ALL_SYMBOLS, callback_data=_CB_SALL)]
     )
+    rows.append(_BACK_NAV_ROW)
     return InlineKeyboardMarkup(rows)
 
 
@@ -2006,12 +2112,14 @@ async def stats(
                 flt["symbol"] = token.upper()
     flt.setdefault("symbol", None)
     flt.setdefault("period", None)
-    message = await update.effective_chat.send_message(
+    await _show_screen(
+        context,
+        update.effective_chat.id,
+        "stats",
         _render_stats(flt.get("symbol"), flt.get("period")),
-        reply_markup=_stats_panel_kb(flt),
-        parse_mode=ParseMode.HTML,
+        _stats_panel_kb(flt),
     )
-    context.user_data["stats_msg_id"] = message.message_id
+    context.user_data.pop("stats_msg_id", None)
 
 
 def _picker_text(page: int, pages: int) -> str:
@@ -2026,26 +2134,14 @@ def _picker_text(page: int, pages: int) -> str:
 async def _refresh_panel(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int, flt: dict
 ) -> None:
-    """Re-render the stats panel on its original message (or send a new one)."""
-    text = _render_stats(flt.get("symbol"), flt.get("period"))
-    markup = _stats_panel_kb(flt)
-    msg_id = context.user_data.get("stats_msg_id")
-    if msg_id:
-        try:
-            await context.bot.edit_message_text(
-                text,
-                chat_id=chat_id,
-                message_id=msg_id,
-                reply_markup=markup,
-                parse_mode=ParseMode.HTML,
-            )
-            return
-        except Exception:
-            logger.info("Stats panel message is gone; sending a new one.")
-    message = await context.bot.send_message(
-        chat_id, text, reply_markup=markup, parse_mode=ParseMode.HTML
+    """Re-render the stats panel on the morphing screen (edit in place)."""
+    await _show_screen(
+        context,
+        chat_id,
+        "stats",
+        _render_stats(flt.get("symbol"), flt.get("period")),
+        _stats_panel_kb(flt),
     )
-    context.user_data["stats_msg_id"] = message.message_id
 
 
 async def _send_export(
@@ -2065,17 +2161,6 @@ async def _send_export(
     path.unlink(missing_ok=True)  # sent; don't leave copies on disk
 
 
-async def _close_picker(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Delete the symbol-picker message if this tap came from it."""
-    picker_id = context.user_data.pop("stats_picker_msg_id", None)
-    message = query.message
-    if picker_id and message is not None and message.message_id == picker_id:
-        try:
-            await message.delete()
-        except Exception:
-            logger.info("Symbol picker message could not be deleted.")
-
-
 async def on_stats_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -2092,22 +2177,23 @@ async def on_stats_callback(
 
     if match.group("period"):
         flt["period"] = match.group("period")
+        text = _render_stats(flt.get("symbol"), flt.get("period"))
+        kb = _stats_panel_kb(flt)
         await query.answer()
         await query.edit_message_text(
-            _render_stats(flt.get("symbol"), flt.get("period")),
-            reply_markup=_stats_panel_kb(flt),
-            parse_mode=ParseMode.HTML,
+            text, reply_markup=kb, parse_mode=ParseMode.HTML
         )
+        _nav_update_top(context, "stats", text, kb)
         return
     if match.group("page"):
         symbols = db.get_all_symbols()
         pages = max(1, math.ceil(len(symbols) / _SYMBOLS_PER_PAGE))
         page = min(max(int(match.group("page")), 1), pages)
+        text = _picker_text(page, pages)
+        kb = _symbol_picker_kb(page, pages, symbols)
         await query.answer()
-        await query.edit_message_text(
-            _picker_text(page, pages),
-            reply_markup=_symbol_picker_kb(page, pages, symbols),
-        )
+        await query.edit_message_text(text, reply_markup=kb)
+        _nav_update_top(context, "stats_symbols", text, kb)
         return
     await query.answer()
 
@@ -2116,10 +2202,11 @@ async def on_stats_callback(
         symbol = match.group("sym")
         # Tapping the active symbol again clears the symbol filter.
         flt["symbol"] = None if flt.get("symbol") == symbol else symbol
-        await _close_picker(query, context)
+        _nav_prune(context, "stats_symbols")
         await _refresh_panel(context, chat_id, flt)
     elif action == _CB_OPEN:
-        # The symbol list gets its own message so the panel stays clean.
+        # The symbol list morphs the same screen message (🔙 brings the
+        # stats panel straight back).
         symbols = db.get_all_symbols()
         if not symbols:
             await context.bot.send_message(
@@ -2127,32 +2214,24 @@ async def on_stats_callback(
             )
             return
         pages = max(1, math.ceil(len(symbols) / _SYMBOLS_PER_PAGE))
-        message = await context.bot.send_message(
+        await _show_screen(
+            context,
             chat_id,
+            "stats_symbols",
             _picker_text(1, pages),
-            reply_markup=_symbol_picker_kb(1, pages, symbols),
+            _symbol_picker_kb(1, pages, symbols),
         )
-        context.user_data["stats_picker_msg_id"] = message.message_id
     elif action == _CB_SALL:
         flt["symbol"] = None
-        await _close_picker(query, context)
+        _nav_prune(context, "stats_symbols")
         await _refresh_panel(context, chat_id, flt)
     elif action == _CB_RESET:
         flt["symbol"] = None
         flt["period"] = None
-        await _close_picker(query, context)
+        _nav_prune(context, "stats_symbols")
         await _refresh_panel(context, chat_id, flt)
     elif action == _CB_EXPORT:
         await _send_export(context, chat_id)
-    elif action == _CB_CLOSE:
-        # 🔙 بازگشت — close the stats panel and show the main menu again.
-        await _close_picker(query, context)
-        context.user_data.pop("stats_msg_id", None)
-        try:
-            await query.message.delete()
-        except Exception:
-            logger.info("Stats panel already gone.")
-        await _ensure_menu(update, context)
     # _CB_NOOP: nothing to do; the spinner is already cleared.
 
 
@@ -2206,21 +2285,26 @@ async def recent(
     since = _recent_since(flt.get("range"))
     total = db.count_trades(since)
     if not total:
-        await update.message.reply_text(
-            "هنوز معامله‌ای ثبت نشده — با /trade اولین معامله را ثبت کنید.",
-            
+        await _show_screen(
+            context,
+            update.effective_chat.id,
+            "recent",
+            "🕘 <b>معاملات اخیر</b>\n\n"
+            "هنوز معامله‌ای ثبت نشده — با 📈 ثبت معامله بسته شروع کنید.",
+            _ik([_HOME_NAV_ROW]),
         )
         return
     pages = max(1, math.ceil(total / _RECENT_PER_PAGE))
     rows = db.get_recent(
         _RECENT_PER_PAGE, offset=0, since=since
     )
-    message = await update.effective_chat.send_message(
+    await _show_screen(
+        context,
+        update.effective_chat.id,
+        "recent",
         _recent_panel_text(1, pages),
-        reply_markup=_recent_panel_kb(rows, 1, pages),
-        parse_mode=ParseMode.HTML,
+        _recent_panel_kb(rows, 1, pages),
     )
-    context.user_data["recent_panel_msg"] = message.message_id
 
 
 async def on_recent_callback(
@@ -2233,7 +2317,6 @@ async def on_recent_callback(
     if match is None:
         await query.answer()
         return
-    chat_id = update.effective_chat.id
     flt = context.user_data.setdefault("recent_filter", {})
     flt.setdefault("range", "all")
     since = _recent_since(flt.get("range"))
@@ -2245,12 +2328,13 @@ async def on_recent_callback(
         rows = db.get_recent(
             _RECENT_PER_PAGE, offset=(page - 1) * _RECENT_PER_PAGE, since=since
         )
+        text = _recent_panel_text(page, pages)
+        kb = _recent_panel_kb(rows, page, pages)
         await query.answer()
         await query.edit_message_text(
-            _recent_panel_text(page, pages),
-            reply_markup=_recent_panel_kb(rows, page, pages),
-            parse_mode=ParseMode.HTML,
+            text, reply_markup=kb, parse_mode=ParseMode.HTML
         )
+        _nav_update_top(context, "recent", text, kb)
         return
     if match.group("range") is not None:
         # Tapping the active range again goes back to all-time.
@@ -2262,18 +2346,19 @@ async def on_recent_callback(
         total = db.count_trades(since)
         await query.answer()
         if not total:
-            await query.edit_message_text(
-                "در این بازه معامله‌ای نیست.",
-                reply_markup=_recent_panel_kb([], 1, 1),
-            )
+            text = "در این بازه معامله‌ای نیست."
+            kb = _recent_panel_kb([], 1, 1)
+            await query.edit_message_text(text, reply_markup=kb)
+            _nav_update_top(context, "recent", text, kb)
             return
         pages = max(1, math.ceil(total / _RECENT_PER_PAGE))
         rows = db.get_recent(_RECENT_PER_PAGE, offset=0, since=since)
+        text = _recent_panel_text(1, pages)
+        kb = _recent_panel_kb(rows, 1, pages)
         await query.edit_message_text(
-            _recent_panel_text(1, pages),
-            reply_markup=_recent_panel_kb(rows, 1, pages),
-            parse_mode=ParseMode.HTML,
+            text, reply_markup=kb, parse_mode=ParseMode.HTML
         )
+        _nav_update_top(context, "recent", text, kb)
         return
     if match.group("view") is not None:
         row = db.get_trade(int(match.group("view")))
@@ -2329,49 +2414,38 @@ async def on_recent_callback(
         rows = db.get_recent(
             _RECENT_PER_PAGE, offset=(page - 1) * _RECENT_PER_PAGE, since=since
         )
+        panel_text = _recent_panel_text(page, pages)
         panel_kb = _recent_panel_kb(rows, page, pages)
-        panel_msg = context.user_data.get("recent_panel_msg")
+        panel_msg = _screen_msg_id(context)
         query_msg = getattr(query, "message", None)
         query_msg_id = getattr(query_msg, "message_id", None)
         await query.answer("🗑 حذف شد.")
+        _recent_page = page
         if query_msg_id is not None and panel_msg == query_msg_id:
             # Delete button on the panel itself: refresh it in place.
             await query.edit_message_text(
-                _recent_panel_text(page, pages),
+                panel_text,
                 reply_markup=panel_kb,
                 parse_mode=ParseMode.HTML,
             )
+            _nav_update_top(context, "recent", panel_text, panel_kb)
         else:
-            # Delete inside a sent detail message: confirm + refresh panel.
-            await query.edit_message_text(
-                "🗑 معامله حذف شد ✅",
-                reply_markup=None,
-            )
-            if panel_msg is not None and context.bot is not None:
-                try:
-                    await context.bot.edit_message_text(
-                        _recent_panel_text(page, pages),
-                        chat_id=chat_id,
-                        message_id=panel_msg,
-                        reply_markup=panel_kb,
-                        parse_mode=ParseMode.HTML,
-                    )
-                except Exception:
-                    logger.info("Could not refresh the recent panel.")
-        _recent_page = page
+            # Delete inside a sent detail message: morph it into the
+            # refreshed panel (the panel message was edited away? then this
+            # edit fails and the panel is simply re-rendered on its slot).
+            try:
+                await query.edit_message_text(
+                    panel_text,
+                    reply_markup=panel_kb,
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                logger.info("Could not refresh the recent panel.")
+            _nav_update_top(context, "recent", panel_text, panel_kb)
         return
-    # home / close / noop
+    # close / noop (home moved to the shared 🔙/🏠 handler)
     await query.answer()
-    if match.group(0) == _RCB_HOME:
-        context.user_data.pop("recent_filter", None)
-        _recent_range = "all"
-        _recent_page = 1
-        try:
-            await query.message.delete()
-        except Exception:
-            logger.info("Recent panel already gone.")
-        await _ensure_menu(update, context)
-    elif match.group(0) == _RCB_CLOSE:
+    if match.group(0) == _RCB_CLOSE:
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
@@ -2456,7 +2530,7 @@ def _open_panel_kb(rows: list, page: int, pages: int) -> InlineKeyboardMarkup:
                 ),
                 InlineKeyboardButton("▶️", callback_data=next_cb),
             ],
-            [InlineKeyboardButton("🏠 Home", callback_data=_OCB_HOME)],
+            _BACK_NAV_ROW,
         ]
     )
 
@@ -2469,7 +2543,6 @@ def _open_detail_text(row) -> str:
         "🪙 کریپتو" if (row["market"] or "crypto") == "crypto" else "💵 فارکس"
     )
     tf = row["timeframe"] or "—"
-    lev = f"{_fmt_num(row['leverage'])}x" if row["leverage"] else "1x"
     risk = f"{_fmt_num(row['risk_percent'])}%" if row["risk_percent"] else "—"
     margin = (
         f"{_fmt_num(row['margin'])} $" if row["margin"] else "—"
@@ -2482,7 +2555,7 @@ def _open_detail_text(row) -> str:
     reason = _ESC(row["reason"]) if row["reason"] else "—"
     return (
         f"🟢 معامله باز #{row['id']} — <b>{_ESC(row['symbol'])}</b>\n"
-        f"{side_icon} {side}  •  {market_fa}  •  ⏱ {tf}  •  ⚡ {lev}\n"
+        f"{side_icon} {side}  •  {market_fa}  •  ⏱ {tf}\n"
         "\n"
         f"• Entry: <code>{_fmt_num(row['entry_price'])}</code>\n"
         f"• 🎯 TP: <code>{tp}</code>\n"
@@ -2524,25 +2597,27 @@ async def open_trades(
     _open_page = 1
     total = db.count_open_trades()
     if not total:
-        # Nothing to show yet — still send the panel (➕ starts the flow)
+        # Nothing to show yet — still show the panel (➕ starts the flow)
         # so the button always behaves the same way.
         rows: list = []
-        message = await update.effective_chat.send_message(
+        await _show_screen(
+            context,
+            update.effective_chat.id,
+            "open",
             "🟢 <b>معاملات باز</b>\n\n"
             "معامله‌ای باز نیست. با دکمه زیر یک معاملهٔ باز ثبت کنید:",
-            reply_markup=_open_panel_kb(rows, 1, 1),
-            parse_mode=ParseMode.HTML,
+            _open_panel_kb(rows, 1, 1),
         )
-        context.user_data["open_panel_msg"] = message.message_id
         return
     pages = max(1, math.ceil(total / _RECENT_PER_PAGE))
     rows = db.get_open_trades(_RECENT_PER_PAGE, offset=0)
-    message = await update.effective_chat.send_message(
+    await _show_screen(
+        context,
+        update.effective_chat.id,
+        "open",
         _open_panel_text(1, pages),
-        reply_markup=_open_panel_kb(rows, 1, pages),
-        parse_mode=ParseMode.HTML,
+        _open_panel_kb(rows, 1, pages),
     )
-    context.user_data["open_panel_msg"] = message.message_id
 
 
 async def open_trades_add_entry(
@@ -2576,7 +2651,6 @@ async def on_open_callback(
     if match is None:
         await query.answer()
         return
-    chat_id = update.effective_chat.id
     if match.group("page") is not None:
         total = db.count_open_trades()
         pages = max(1, math.ceil(total / _RECENT_PER_PAGE))
@@ -2585,12 +2659,13 @@ async def on_open_callback(
         rows = db.get_open_trades(
             _RECENT_PER_PAGE, offset=(page - 1) * _RECENT_PER_PAGE
         )
+        text = _open_panel_text(page, pages)
+        kb = _open_panel_kb(rows, page, pages)
         await query.answer()
         await query.edit_message_text(
-            _open_panel_text(page, pages),
-            reply_markup=_open_panel_kb(rows, page, pages),
-            parse_mode=ParseMode.HTML,
+            text, reply_markup=kb, parse_mode=ParseMode.HTML
         )
+        _nav_update_top(context, "open", text, kb)
         return
     if match.group("view") is not None:
         row = db.get_open_trade(int(match.group("view")))
@@ -2641,16 +2716,14 @@ async def on_open_callback(
                 )
         logger.info("Deleted open trade #%s", open_id)
         total = db.count_open_trades()
-        panel_msg = context.user_data.get("open_panel_msg")
+        panel_msg = _screen_msg_id(context)
         query_msg = getattr(query, "message", None)
         query_msg_id = getattr(query_msg, "message_id", None)
         if not total:
-            context.user_data.pop("open_panel_msg", None)
+            text = "🗑 معامله باز حذف شد — معامله بازی نمانده است."
             await query.answer("حذف شد.")
-            await query.edit_message_text(
-                "🗑 معامله باز حذف شد — معامله بازی نمانده است.",
-                reply_markup=None,
-            )
+            await query.edit_message_text(text, reply_markup=None)
+            _nav_prune(context, "open")
             return
         pages = max(1, math.ceil(total / _RECENT_PER_PAGE))
         page = min(max(_open_page, 1), pages)
@@ -2658,31 +2731,28 @@ async def on_open_callback(
         rows = db.get_open_trades(
             _RECENT_PER_PAGE, offset=(page - 1) * _RECENT_PER_PAGE
         )
+        panel_text = _open_panel_text(page, pages)
         panel_kb = _open_panel_kb(rows, page, pages)
         await query.answer("🗑 حذف شد.")
         if query_msg_id is not None and panel_msg == query_msg_id:
             # Delete button on the panel itself: refresh it in place.
             await query.edit_message_text(
-                _open_panel_text(page, pages),
+                panel_text,
                 reply_markup=panel_kb,
                 parse_mode=ParseMode.HTML,
             )
         else:
-            # Delete inside a sent detail message: confirm + refresh panel.
-            await query.edit_message_text(
-                "🗑 معامله باز حذف شد ✅", reply_markup=None
-            )
-            if panel_msg is not None and context.bot is not None:
-                try:
-                    await context.bot.edit_message_text(
-                        _open_panel_text(page, pages),
-                        chat_id=chat_id,
-                        message_id=panel_msg,
-                        reply_markup=panel_kb,
-                        parse_mode=ParseMode.HTML,
-                    )
-                except Exception:
-                    logger.info("Could not refresh the open-trades panel.")
+            # Delete inside a sent detail message: morph it into the
+            # refreshed panel (falls back silently when already gone).
+            try:
+                await query.edit_message_text(
+                    panel_text,
+                    reply_markup=panel_kb,
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                logger.info("Could not refresh the open-trades panel.")
+        _nav_update_top(context, "open", panel_text, panel_kb)
         return
     if match.group("close") is not None:
         open_id = int(match.group("close"))
@@ -2693,27 +2763,19 @@ async def on_open_callback(
         _reset_flow(context)
         context.user_data["open_id"] = open_id
         context.user_data["open_symbol"] = row["symbol"]
-        # Margin snapshot (budget feature) — drives the P&L preview/summary.
+        # Margin snapshot (budget feature) — gives ROI on close (optional).
         context.user_data["open_margin"] = row["margin"]
         context.user_data["open_entry_price"] = row["entry_price"]
         context.user_data["open_direction"] = row["direction"]
-        context.user_data["open_leverage"] = row["leverage"]
         await query.answer()
         await update.effective_chat.send_message(
             f"بستن معامله #{open_id} {_ESC(row['symbol'])} — نتیجه؟",
             reply_markup=_STATUS_KEYBOARD,
         )
         return
-    # home / close-msg / noop  (➕ and 🏁 are conversation entry points)
+    # close-msg / noop  (➕ and 🏁 are conversation entry points)
     await query.answer()
-    if match.group(0) == _OCB_HOME:
-        context.user_data.pop("open_panel_msg", None)
-        try:
-            await query.message.delete()
-        except Exception:
-            logger.info("Open-trades panel already gone.")
-        await _ensure_menu(update, context)
-    elif match.group(0) == _OCB_CLOSE_MSG:
+    if match.group(0) == _OCB_CLOSE_MSG:
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
@@ -2730,7 +2792,13 @@ def build_open_callbacks() -> CallbackQueryHandler:
 async def open_trade_start(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Start the open-trades questionnaire with the market question."""
+    """Start the open-trades questionnaire with the market question.
+
+    Any half-finished previous draft (and its dangling question message) is
+    wiped first — flows always start from scratch, never resume (the trader
+    found picking up where they "left off" confusing).
+    """
+    await _q_drop(update, context)  # remove a dangling question, if any
     _drop_screenshot(context)
     _reset_flow(context)
     text = (
@@ -2810,39 +2878,6 @@ async def ask_open_direction(
             reply_markup=_DIR_KEYBOARD,
         )
         return OPEN_DIRECTION
-    return await _prompt_open_leverage(update, context)
-
-
-async def _prompt_open_leverage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await _q_send(update, context,
-        "⚡ اهرم (Leverage) — چند برابر؟",
-        reply_markup=_lev_keyboard(),
-    )
-    return OPEN_LEVERAGE
-
-
-async def ask_open_leverage(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Same parsing as /trade's leverage: ×N, xN, N, or ⏭ (no leverage = 1x)."""
-    raw = (update.message.text or "").strip()
-    if raw.lower() in _SKIP_LEV_TOKENS:
-        context.user_data.pop("leverage", None)  # skipped → defaults to 1x
-        return await _prompt_open_timeframe(update, context)
-    text = raw.lower().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
-    text = text.replace("×", "x").replace(" ", "")
-    if text.startswith("x"):
-        text = text[1:]
-    if text.endswith("x"):
-        text = text[:-1]
-    number = _parse_positive(text)
-    if number is None or number > 1000:
-        await _q_send(update, context,
-            "Leverage نامعتبر — عدد بفرستید (مثلاً 10 یا 10x) یا «⏭ بدون اهرم»:",
-            reply_markup=_lev_keyboard(),
-        )
-        return OPEN_LEVERAGE
-    context.user_data["leverage"] = number
     return await _prompt_open_timeframe(update, context)
 
 
@@ -3024,8 +3059,9 @@ def _margins_conflict(user_margin: float, auto_margin_value: float) -> bool:
 async def _prompt_open_margin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await _q_send(update, context,
         "💰 Margin — چند دلار به این معامله اختصاص می‌دی؟ (فقط USD، مثل 250)\n"
-        "یا 🧮 را بزن تا از روی بودجه و درصد ریسک حساب شود:",
-        reply_markup=_ik([[MARGIN_AUTO_BTN], _CANCEL_IK_ROW]),
+        "یا 🧮 را بزن تا از روی بودجه و درصد ریسک حساب شود؛ "
+        f"{_SKIP_MARGIN_BTN} یعنی بدون مارجین:",
+        reply_markup=_OPEN_MARGIN_KEYBOARD,
     )
     return OPEN_MARGIN
 
@@ -3038,18 +3074,20 @@ async def ask_open_margin(
     🧮 stores the auto value directly; a manual value that differs from the
     auto one by more than 10 % gets a notice and a one-tap switch (the
     resolving buttons are answered in this same state, before any parsing).
+    ⏭ رد کردن leaves the margin empty.
     """
     raw = (update.message.text or "").strip()
+
+    # --- skip: no margin at all ------------------------------------------
+    if raw in _SKIP_MARGIN_TOKENS:
+        context.user_data.pop("margin", None)
+        return await _prompt_open_entry(update, context)
 
     # --- resolving a flagged mismatch (⚠️ notice is on screen) ---------------
     pending = context.user_data.get("_margin_conflict_user")
     if pending is not None and raw in (MARGIN_AUTO_FIX_BTN, "auto", "پیشنهاد"):
         context.user_data.pop("_margin_conflict_user", None)
         context.user_data["margin"] = _auto_margin(context.user_data)
-        return await _prompt_open_entry(update, context)
-    if pending is not None and raw in (MARGIN_KEEP_BTN, "mine", "خودم"):
-        context.user_data.pop("_margin_conflict_user", None)
-        context.user_data["margin"] = pending
         return await _prompt_open_entry(update, context)
 
     # --- fresh answer: 🧮 auto, a typed USD number, or an invalid one --------
@@ -3058,7 +3096,7 @@ async def ask_open_margin(
         if auto is None:
             await update.message.reply_text(
                 "برای محاسبهٔ خودکار، بودجه (⚙️ تنظیمات) و درصد ریسک لازم است. "
-                "عدد مارجین را دستی بفرستید:",
+                f"عدد مارجین را دستی بفرستید یا {_SKIP_MARGIN_BTN}:",
                 reply_markup=_OPEN_MARGIN_KEYBOARD,
             )
             return OPEN_MARGIN
@@ -3069,7 +3107,7 @@ async def ask_open_margin(
     if number is None:
         await update.message.reply_text(
             "مارجین نامعتبر — یک عدد مثبت به دلار بفرستید (مثل 250) "
-            "یا 🧮 را بزن:"
+            f"یا {_SKIP_MARGIN_BTN}:"
         )
         return OPEN_MARGIN
     auto = _auto_margin(context.user_data)
@@ -3151,7 +3189,6 @@ def _open_summary(data: dict) -> str:
     )
     symbol = _ESC(data["symbol"])
     risk = data.get("risk_percent")
-    lev = data.get("leverage")
     when = data.get("trade_date", "")
     if data.get("entry_time"):
         when += f" {data['entry_time']}"
@@ -3166,7 +3203,6 @@ def _open_summary(data: dict) -> str:
         f"• Symbol    <b>{symbol}</b>\n"
         f"• Side      {_DIR_LABEL.get(data['direction'], data['direction'])}\n"
         f"• TF        {data.get('timeframe') or '-'}\n"
-        f"• Lev       {_fmt_num(lev or 1)}x\n"
         + (f"• Reason    {reason}\n" if data.get("reason") else "")
         + (f"• Shot      {shot}\n" if shot else "")
         + "\n"
@@ -3228,7 +3264,6 @@ async def save_open_trade(
             take_profit=data.get("take_profit"),
             stop_loss=data.get("stop_loss"),
             margin=data.get("margin"),
-            leverage=data.get("leverage"),
         )
         logger.info("Saved open trade #%s %s", open_id, data["symbol"])
         symbol = _ESC(data["symbol"])
@@ -3241,7 +3276,6 @@ async def save_open_trade(
             f"• <b>{symbol}</b> · "
             f"{_DIR_LABEL.get(data['direction'], data['direction'])}"
             + (f" · {data.get('timeframe')}" if data.get("timeframe") else "")
-            + f" · ⚡ {_fmt_num(data.get('leverage') or 1)}x"
             + "\n"
             + (
                 f"• 💰 Margin: {_fmt_num(data['margin'])} $\n"
@@ -3306,11 +3340,10 @@ async def _close_begin(
     _reset_flow(context)
     context.user_data["open_id"] = open_id
     context.user_data["open_symbol"] = row["symbol"]
-    # Margin snapshot (budget feature) — drives the P&L preview/summary.
+    # Margin snapshot (budget feature) — gives ROI on close (optional).
     context.user_data["open_margin"] = row["margin"]
     context.user_data["open_entry_price"] = row["entry_price"]
     context.user_data["open_direction"] = row["direction"]
-    context.user_data["open_leverage"] = row["leverage"]
     await _q_send(update, context,
         f"بستن معامله #{open_id} {_ESC(row['symbol'])} — نتیجه؟",
         reply_markup=_STATUS_KEYBOARD,
@@ -3325,10 +3358,46 @@ async def ask_close_status(
     status = _STATUS_TOKENS.get(raw)
     if status is None:
         await update.message.reply_text(
-            "نتیجه را انتخاب کنید: ✅ Win (TP) / ❌ Loss (SL) / ➖ BE / ✏️ Manual"
+            "نتیجه را انتخاب کنید: ✅ Win (TP) / ❌ Loss (SL) / ➖ BE / ✏️ دستی"
         )
         return CLOSE_STATUS
     context.user_data["hit"] = status
+    if status == "be":
+        # Breakeven: nothing gained, nothing lost — skip the amount.
+        context.user_data["close_pnl"] = 0.0
+        await _q_send(update, context,
+            "تاریخ بستن معامله:\nYYYY-MM-DD  (e.g. 2026-02-09)",
+            reply_markup=_DATE_KEYBOARD,
+        )
+        return CLOSE_DATE
+    return await _prompt_close_amount(update, context)
+
+
+async def _prompt_close_amount(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    hit = context.user_data.get("hit")
+    if hit == "win":
+        hint = "چند دلار سود کردی؟ (فقط عدد، مثلاً 120.50)"
+    elif hit == "lose":
+        hint = "چند دلار ضرر کردی؟ (فقط عدد، مثلاً 80)"
+    else:
+        hint = "چند دلار سود یا ضرر کردی؟ (فقط عدد)"
+    await _q_send(update, context, f"💵 {hint}")
+    return CLOSE_AMOUNT
+
+
+async def ask_close_amount(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Store the dollar amount the trader actually gained or lost."""
+    number = _parse_positive(update.message.text or "")
+    if number is None:
+        await update.message.reply_text(
+            "مبلغ نامعتبر — فقط عدد بفرستید (مثلاً 120.50):"
+        )
+        return CLOSE_AMOUNT
+    context.user_data["close_pnl"] = number
     await _q_send(update, context,
         "تاریخ بستن معامله:\nYYYY-MM-DD  (e.g. 2026-02-09)",
         reply_markup=_DATE_KEYBOARD,
@@ -3544,30 +3613,20 @@ def _close_summary(data: dict) -> str:
     shots = len((data.get("exit_photos") or "").splitlines())
     reason = _ESC(data["notes"]) if data.get("notes") else ""
     mood = data.get("mood")
-    # Margin/P&L preview (budget feature): when the open questionnaire
-    # recorded a margin, the close computes real P&L and ROI. Leverage
-    # multiplies the price move; a skipped question means 1x.
+    # The P&L is the trader's typed amount (signed by the status); ROI only
+    # appears when the open questionnaire recorded a margin (optional).
+    pnl = _close_pnl_signed(data)
     margin = data.get("open_margin")
-    entry_price = data.get("open_entry_price")
-    direction = data.get("open_direction")
-    lev = data.get("open_leverage") or 1.0
-    pnl_line = ""
-    if margin and entry_price and direction in ("long", "short"):
-        exit_price = data.get("exit_price") or 0
-        move = (
-            (exit_price - entry_price)
-            if direction == "long"
-            else (entry_price - exit_price)
-        )
-        pnl = round(move / entry_price * margin * lev, 2)
-        roi = round(pnl / margin * 100.0, 2)
-        pnl_line = (
+    roi = _roi_from_pnl(pnl, margin)
+    pnl_line = (
+        f"• P&L       {_fmt_pnl(pnl)}\n"
+        + (f"           ROI {_fmt_roi(roi)}\n" if roi is not None else "")
+        + (
             f"• Margin    {_fmt_num(margin)} $\n"
-            f"• Lev       {_fmt_num(lev)}x\n"
-            f"• P&L       {_fmt_num(pnl)} $ ({_fmt_num(roi)}%)\n"
+            if margin
+            else ""
         )
-    elif lev != 1.0:
-        pnl_line = f"• Lev       {_fmt_num(lev)}x\n"
+    )
     return (
         "🔎 <b>تأیید بستن معامله</b>\n"
         "————————————————\n"
@@ -3580,11 +3639,22 @@ def _close_summary(data: dict) -> str:
         + (f"• Shots     {_fa_num(shots)}\n" if shots else "")
         + (f"• Reason    {reason}\n" if data.get("notes") else "")
         + (f"• Mood      {_MOOD_LABELS.get(mood, mood)}\n" if mood else "")
-        + (pnl_line + "\n" if pnl_line else "")
+        + pnl_line
         + "\n"
         "معامله به تاریخچه معاملات بسته‌شده منتقل می‌شود.\n"
         "ثبت شود؟"
     )
+
+
+def _close_pnl_signed(data: dict) -> float:
+    """Signed P&L of a close draft (trader's typed amount, status = sign)."""
+    amount = data.get("close_pnl") or 0.0
+    hit = data.get("hit")
+    if hit == "lose":
+        return -abs(amount)
+    if hit == "be":
+        return 0.0
+    return abs(amount)
 
 
 async def _prompt_close_confirm(
@@ -3612,26 +3682,11 @@ async def save_close_trade(
         data = dict(context.user_data)
         _reset_flow(context)
         open_id = data.pop("open_id")
-        # Real P&L/ROI when the open questionnaire recorded a margin
-        # (db.close_open_trade stores the same values from the DB row).
-        # Leverage multiplies the price move; skipped = 1x.
-        _close_pnl = _close_roi = None
+        # The trader types the real dollar result; the status only signs it.
         _margin = data.get("open_margin")
-        _lev = data.get("open_leverage") or 1.0
-        if _margin and data.get("open_entry_price"):
-            _move = (
-                (data["exit_price"] - data["open_entry_price"])
-                if data.get("open_direction") == "long"
-                else (data["open_entry_price"] - data["exit_price"])
-            )
-            _close_pnl = round(
-                _move / data["open_entry_price"] * _margin * _lev, 2
-            )
-            # ROI derives from the ROUNDED pnl — the same convention the
-            # database uses, so the message never disagrees with the row.
-            _close_roi = round(_close_pnl / _margin * 100.0, 2)
+        _close_pnl = _close_pnl_signed(data)
+        _close_roi = _roi_from_pnl(_close_pnl, _margin)
         data["_close_pnl"], data["_close_roi"] = _close_pnl, _close_roi
-        data["_close_lev"] = _lev
         new_id = db.close_open_trade(
             open_id,
             hit=data["hit"],
@@ -3642,6 +3697,8 @@ async def save_close_trade(
             mood=data.get("mood") or "",
             exit_photos=data.get("exit_photos") or None,
             screenshot_after=None,
+            pnl=_close_pnl,
+            roi=_close_roi,
         )
         if new_id is None:
             await update.message.reply_text(
@@ -3655,6 +3712,11 @@ async def save_close_trade(
         _reset_flow(context)
         chat_id = update.effective_chat.id
         await _drop_screen_message(context, chat_id, "flow")
+        # Budget feature: a closed trade moves the account budget by its P&L.
+        budget_line = ""
+        new_budget = db.adjust_budget(_close_pnl)
+        if new_budget is not None:
+            budget_line = f"\n• 💰 بودجهٔ جدید: {_fmt_num(new_budget)} $"
         emoji = _OPEN_EMOJI.get(data["hit"], "✏️")
         label = _OPEN_STATUS_LABELS.get(data["hit"], data["hit"])
         text = (
@@ -3662,20 +3724,33 @@ async def save_close_trade(
             "\n"
             f"• <b>{_ESC(data.get('open_symbol', ''))}</b>"
             f" · #{new_id}\n"
-            f"• {label} · Exit {_fmt_num(data['exit_price'])}"
-            f" · ⚡ {_fmt_num(data.get('_close_lev', 1))}x\n"
+            f"• {label} · Exit {_fmt_num(data['exit_price'])}\n"
             f"• 📅 {data['trade_date']}"
             + (f" {data['exit_time']}" if data.get("exit_time") else "")
             + "\n"
             + (
-                f"• 💵 P&L: {_fmt_num(data['_close_pnl'])} $"
-                f" ({_fmt_num(data['_close_roi'])}%)\n"
-                if data.get("_close_pnl") is not None
-                else ""
+                f"• 💵 P&L: {_fmt_num(_close_pnl)} $"
+                + (
+                    f" ({_fmt_num(_close_roi)}%)"
+                    if _close_roi is not None
+                    else ""
+                )
+                + "\n"
             )
+            + budget_line
             + "\n"
             "در 🕘 معاملات اخیر و 📊 آمار قابل مشاهده است."
         )
+        try:
+            await update.message.reply_text(
+                text, parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            logger.error(
+                "HTML close confirmation failed:\\n%s", traceback.format_exc()
+            )
+            await update.message.reply_text(re.sub(r"</?[bi]>", "", text))
+        return ConversationHandler.END
         try:
             await update.message.reply_text(
                 text, parse_mode=ParseMode.HTML
@@ -3724,10 +3799,6 @@ def build_open_conversation() -> ConversationHandler:
             OPEN_DIRECTION: [
                 CallbackQueryHandler(_tap_step(ask_open_direction), pattern=_Q_CB_RE),
                 MessageHandler(_ANSWER, _msg_step(ask_open_direction)),
-            ],
-            OPEN_LEVERAGE: [
-                CallbackQueryHandler(_tap_step(ask_open_leverage), pattern=_Q_CB_RE),
-                MessageHandler(_ANSWER, _msg_step(ask_open_leverage)),
             ],
             OPEN_TIMEFRAME: [
                 CallbackQueryHandler(_tap_step(ask_open_timeframe), pattern=_Q_CB_RE),
@@ -3804,6 +3875,10 @@ def build_close_conversation() -> ConversationHandler:
             CLOSE_STATUS: [
                 CallbackQueryHandler(_tap_step(ask_close_status), pattern=_Q_CB_RE),
                 MessageHandler(_ANSWER, _msg_step(ask_close_status)),
+            ],
+            CLOSE_AMOUNT: [
+                CallbackQueryHandler(_tap_step(ask_close_amount), pattern=_Q_CB_RE),
+                MessageHandler(_ANSWER, _msg_step(ask_close_amount)),
             ],
             CLOSE_DATE: [
                 CallbackQueryHandler(_tap_step(ask_close_date), pattern=_Q_CB_RE),
@@ -3920,7 +3995,6 @@ def _recent_detail_text(row) -> str:
         "🪙 کریپتو" if (row["market"] or "crypto") == "crypto" else "💵 فارکس"
     )
     tf = row["timeframe"] or "—"
-    lev = f"{_fmt_num(row['leverage'])}x" if row["leverage"] else "1x"
     risk = f"{_fmt_num(row['risk_percent'])}%" if row["risk_percent"] else "—"
     entry = _fmt_num(row["entry_price"])
     exit_ = _fmt_num(row["exit_price"]) if row["exit_price"] else "—"
@@ -3982,7 +4056,6 @@ def _recent_detail_text(row) -> str:
         "\n"
         f"• نتیجه: {result}\n"
         f"• 💰 مارجین: {_fmt_size(row['size']) if row['size'] else '—'}\n"
-        f"• ⚡ اهرم: {lev}\n"
         f"• ⚠️ ریسک: {risk}\n"
         "\n"
         f"{date_line}\n"
@@ -4029,7 +4102,7 @@ def _recent_panel_kb(rows: list, page: int, pages: int) -> InlineKeyboardMarkup:
                 ),
                 InlineKeyboardButton("▶️", callback_data=next_cb),
             ],
-            [InlineKeyboardButton("🏠 Home", callback_data=_RCB_HOME)],
+            _BACK_NAV_ROW,
         ]
     )
 

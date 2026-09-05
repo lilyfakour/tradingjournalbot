@@ -7,7 +7,7 @@ it through the bot later, and it moves into your history.
 ## Language / زبان
 
 The bot's UI is in **Persian** (رسمی — polite register) with **technical
-market terms in English** (Entry, Take Profit, Stop Loss, Leverage, Margin,
+market terms in English** (Entry, Take Profit, Stop Loss, Margin,
 Risk, Win/Loss/BE, P&L, ROI, Win rate, Profit Factor, Long, Short). Face-style
 emojis were removed for a professional look. Slash commands stay English
 (`/trade`, `/stats`, …), and typed English answers (`l`/`s`, `win`/`lose`/`be`,
@@ -21,13 +21,13 @@ data and the spreadsheet column layout keep working.
 
 | Command | What it does |
 | --- | --- |
-| `/trade` | 📈 **ثبت معامله بسته‌شده** (after you have exited): بازار (🪙 کریپتو / 💵 فارکس) -> symbol (recent / most-used as buttons) -> 📈 Long / 📉 Short -> Leverage (skippable) -> timeframe -> Entry -> 🎯 Take Profit -> 🛑 Stop Loss -> نتیجه (✅ Win / ❌ Loss / ➖ BE) -> 💰 Margin -> ⚠️ Risk % (skippable) -> date (📅 امروز) -> hour (**🕐 الان** fills the current time) -> دلیل ورود -> Mood -> 📸 screenshot before -> 📸 screenshot after -> ✅ ذخیره / ❌ ثبت نشود. **P&L and ROI are calculated automatically** from margin × leverage × price move — the trader is never asked |
-| `/recent` | Paginated **inline panel** — **one button per trade** (result emoji + id + pair + P&L or —, 📷 if screenshots, 🔁 if it was a two-phase open→close trade) with ◀️/▶️ paging, an All/1W/1M range filter, and a 🏠 Home button. Tapping a trade **sends a separate, airy detail message** (all fields with bullets, emoji labels and blank lines) carrying 📷 عکس چارت (entry before/after shots) + 📸 عکس‌های خروج (the up-to-4 exit shots of two-phase trades) + 🗑 Delete + ❌ Close; deleting confirms on the detail and refreshes the panel |
-| `/open` | 🟢 **ثبت معامله باز جدید** — a dedicated button on the main menu (📈 ثبت معامله بسته · **🟢 ثبت معامله باز**) starts the open-trade questionnaire straight away: بازار → symbol → Long/Short → ⚡ Leverage (skippable — skipped means **1x**) → timeframe → دلیل ورود → 📸 entry screenshot (optional) → entry date → entry hour (**🕐 الان** fills the current time) → Risk → 💰 Margin (**🧮 محاسبه خودکار** = بودجه × ریسک٪؛ مقادیر دستی که با ریسک نخواند با ⚠️ علام می‌خورند) → Entry → 🎯 TP → 🛑 SL → confirm. Saved to «معاملات باز», **not** the history |
-| `/opens` | 🟢 **Open trades panel** — one button per running position (entry price + 📷 mark) with ◀️/▶️ paging, **➕ ثبت معامله باز** to start the questionnaire, and 🏠 Home. Tapping a trade sends its detail card |
-| `/close <id>` | 🏁 Close an open trade (same flow as the 🏁 button on its detail card): status (✅ Win/TP · ❌ Loss/SL · ➖ BE · ✏️ Manual exit) → exit date → exit time (**🕐 الان** fills the current time) → exit price (**auto-filled** for TP/SL/BE) → up to **4 exit screenshots** → دلیل خروج → Mood → confirm; the trade then moves into the normal history, `/recent` and `/stats` |
+| `/trade` | 📈 **ثبت معامله بسته‌شده** (after you have exited): بازار (🪙 کریپتو / 💵 فارکس) -> symbol (recent / most-used as buttons) -> 📈 Long / 📉 Short -> timeframe -> Entry -> 🎯 Take Profit -> 🛑 Stop Loss -> نتیجه (✅ Win / ❌ Loss / ➖ BE) -> 💵 **سود/ضرر چند دلار؟** (the exact dollar amount is stored as-is) -> 💰 Margin (skippable with ⏭) -> ⚠️ Risk % (skippable) -> date (📅 امروز) -> hour (**🕐 الان** fills the current time) -> دلیل ورود -> Mood -> 📸 screenshot before -> 📸 screenshot after -> ✅ ذخیره / ❌ ثبت نشود. **No leverage anywhere** — what you type is what gets saved; ROI appears when a margin is given |
+| `/recent` | Paginated **inline panel** — **one button per trade** (result emoji + id + pair + P&L or —, 📷 if screenshots, 🔁 if it was a two-phase open→close trade) with ◀️/▶️ paging, an All/1W/1M range filter, and the shared 🔙/🏠 row. Tapping a trade **sends a separate, airy detail message** (all fields with bullets, emoji labels and blank lines) carrying 📷 عکس چارت (entry before/after shots) + 📸 عکس‌های خروج (the up-to-4 exit shots of two-phase trades) + 🗑 Delete + ❌ Close; deleting morphs the screen back into the refreshed panel |
+| `/open` | 🟢 **ثبت معامله باز جدید** — a dedicated button on the main menu (📈 ثبت معامله بسته · **🟢 ثبت معامله باز**) starts the open-trade questionnaire straight away (and always from scratch — no resume): بازار → symbol → Long/Short → timeframe → دلیل ورود → 📸 entry screenshot (optional) → entry date → entry hour (**🕐 الان** fills the current time) → Risk → 💰 Margin (**🧮 محاسبه خودکار** = بودجه × ریسک٪, or ⏭ رد کردن to leave it empty) → Entry → 🎯 TP → 🛑 SL → confirm. Saved to «معاملات باز», **not** the history |
+| `/opens` | 🟢 **Open trades panel** — one button per running position (entry price + 📷 mark) with ◀️/▶️ paging, **➕ ثبت معامله باز** to start the questionnaire, and the shared 🔙/🏠 row. Tapping a trade sends its detail card |
+| `/close <id>` | 🏁 Close an open trade (same flow as the 🏁 button on its detail card): status (✅ Win/TP · ❌ Loss/SL · ➖ BE · ✏️ Manual exit) → 💵 **سود/ضرر چند دلار؟** (skipped for BE) → exit date → exit time (**🕐 الان** fills the current time) → exit price (**auto-filled** for TP/SL/BE) → up to **4 exit screenshots** → دلیل خروج → Mood → confirm; the trade then moves into the normal history, `/recent` and `/stats` |
 | `/stats` | Filterable performance panel with **inline buttons attached to the message** (period, symbol, reset, export); `/stats BTCUSD 1w` style arguments still work |
-| `/settings` | ⚙️ **تنظیمات** — the account **budget in USD** (💰 بودجه). The budget feeds the 🧮 محاسبه خودکار margin calculation of the open questionnaire; `حذف` clears it |
+| `/settings` | ⚙️ **تنظیمات** — the account **budget in USD** (💰 بودجه). The budget feeds the 🧮 محاسبه خودکار margin calculation of the open questionnaire **and moves by every closed trade's P&L** (profit ➕ / loss ➖) so it stays the live account size; `حذف` clears it |
 | `/delete <id>` | Delete a trade, e.g. `/delete 12` |
 | `/export` | Download all trades as an `.xlsx` spreadsheet |
 | `/cancel` | Abort the current `/trade` entry |
@@ -66,11 +66,24 @@ answer are equivalent (`l`/`s` for direction, `win`/`lose`/`be`/`breakeven`
 for the result, `5min`/`daily`/`weekly` for timeframes, `-` as the universal
 skip shortcut). The old reply-keyboard bar under the input field is gone.
 
+## Result questions (no leverage, no auto-computed P&L)
+
+- **No leverage question anywhere.** The trader records what actually
+  happened: after picking the result the bot asks **💵 چند دلار سود یا ضرر
+  کردی؟** and stores exactly that amount (Win ➕ / Loss ➖, BE stores 0 and
+  skips the question).
+- **Margin is optional** — ⏭ رد کردن in both `/trade` and `/open` leaves it
+  empty. A stored margin gives **ROI = P&L ÷ margin**; without one ROI simply
+  stays unknown.
+- **The budget is live**: every closed trade moves the ⚙️ تنظیمات budget by
+  its P&L, and the close confirmation shows «بودجهٔ جدید».
+
 ## Menu
 
-- The inline UI needs **no ☰ command list** — the bot clears its legacy
-  slash-command registration on every start, so the ☰ button next to the
-  message bar stays empty. Everything is a button on the bot's messages.
+- The ☰ **Menu button** next to the message bar is **registered on every
+  start** with the command list (start, opens, recent, stats, settings,
+  export, delete, cancel) — Telegram's own command menu, separate from the
+  inline buttons on the messages.
 - `/start` sends the **main menu as a message with inline buttons**: 📈 ثبت
   معامله بسته · 🟢 ثبت معامله باز / 🟢 معاملات باز · 📊 آمار / 🕘 معاملات اخیر ·
   📥 اکسل / ⚙️ تنظیمات. The closed-trade button is labeled «ثبت معامله بسته» —
@@ -79,12 +92,18 @@ skip shortcut). The old reply-keyboard bar under the input field is gone.
   secondary screens open on top of it, and 📈 / 🟢 safely restart their
   questionnaires even mid-entry.
 - The **first menu after (re)starting the bot** also removes the persistent
-  reply-keyboard bar of the old UI (one short confirmation message asks
-  Telegram to drop it — afterwards the bar never comes back).
-- Every secondary screen (⚙️ تنظیمات → 💰 بودجه, and the 🏠 Home button of the
-  📊/🕘/🟢 panels) **drills down**: the current screen is deleted and the next
-  one appears, with a **🔙 بازگشت** row that deletes the screen and shows the
-  main menu again (freshly re-sent if its message is gone).
+  reply-keyboard bar of the old UI — **silently**: one message with the
+  `ReplyKeyboardRemove` flag is sent and instantly deleted, so the bar is
+  dropped without any notification appearing in the chat.
+- **Morphing navigation:** every secondary screen (⚙️ تنظیمات → 💰 بودجه, and
+  the 📊/🕘/🟢 panels including the stats symbol picker) is **one message per
+  chat** that is **edited in place** as the trader moves around — drilling
+  into 💰 was never a delete + re-send. Every screen carries a shared
+  **🔙 (one level back)** / **🏠 (straight to the main menu)** row; the main
+  menu itself owns its own persistent message.
+- **Fresh flows every time:** starting 🟢 ثبت معامله باز always wipes any
+  half-finished draft and restarts from the market question — an abandoned
+  questionnaire can never resume from an old step.
 
 ## Stats panel
 
@@ -97,10 +116,10 @@ under the numbers they control.
   *symbol* of the numbers above, nothing else (not timeframes, not trades).
 - **Periods** — `1W · 1M · 3M · 6M · 1Y · All`; the active period is marked
   with ✓.
-- **🔤 Symbols** — opens a separate, dedicated picker message so the symbol
-  list never clutters the panel: 10 symbols per page, sorted by your **most
-  recent trade** first, with ◀️/▶️ page navigation, a page counter, and
-  «همه نمادها» / ✖️ Close buttons. Tapping a symbol filters the panel;
+- **🔤 Symbols** — **morphs the panel message itself** into the picker (🔙
+  brings the panel straight back): 10 symbols per page, sorted by your **most
+  recent trade** first, with ◀️/▶️ page navigation, a page counter, and a
+  «همه نمادها» button. Tapping a symbol filters the panel;
   tapping the active symbol again clears it.
 - **♻️ Reset** clears all filters in one tap. **📤 Export** sends the
   `.xlsx` spreadsheet without leaving the panel.
@@ -126,7 +145,7 @@ in the filtered range.
 `/export` sends every logged trade as an Excel workbook (`.xlsx`) — one row
 per trade with id, symbol, market (crypto/forex), direction, timeframe,
 entry, the price that hit, take profit, stop loss, the result
-(Win/Loss/BE), leverage, margin, risk %, P&L, **ROI %**, date, mood, reason
+(Win/Loss/BE), margin, risk %, P&L, **ROI %**, date, mood, reason
 for entry and creation time. The header row is
 frozen and filterable, and the price/size/P&L/ROI columns stay **numeric** so
 you can pivot, chart and do math directly in Excel or Google Sheets. Trades
@@ -161,44 +180,43 @@ questionnaire.
   تایم‌فریم، دلیل ورود، 📸 اسکرین‌شات ورود (اختیاری)، تاریخ ورود، ساعت ورود
   (دکمه **🕐 الان** زمان همین حالا را ثبت می‌کند)، ⚠️ Risk، 💰 Margin، Entry،
   🎯 TP و 🛑 SL — in that order — then shows the confirmation
-  summary and saves the position to «معاملات باز». The leverage question sits
-  right after the direction (same ×2…×125 keyboard as `/trade`); skipping it
-  means the trade runs at **1x**.
+  summary and saves the position to «معاملات باز». There is **no leverage
+  question**; the margin step can be skipped with ⏭ رد کردن.
 - **Phase 2 — close:** later, tap the trade in the 🟢 panel and press
   **🏁 Close trade** (or send `/close <id>`). The bot asks the status
-  (✅ Win/TP · ❌ Loss/SL · ➖ BE · ✏️ Manual exit), the exit date and the exit
-  time (دکمه **🕐 الان**) as two separate questions, then the exit price —
+  (✅ Win/TP · ❌ Loss/SL · ➖ BE · ✏️ Manual exit), the **dollar result**
+  (skipped for BE), the exit date and the exit time (دکمه **🕐 الان**) as two
+  separate questions, then the exit price —
   **auto-filled from TP/SL/entry for the first three statuses** — up to
   **4 exit screenshots** (one per message, skippable), the reason for exiting
   and the mood. After
   the confirmation the position leaves the open list and appears in
   `/recent`, `/stats` and the Excel export.
 
-The 💰 margin question (budget feature): type the committed USD amount, or tap
-**🧮 محاسبه خودکار** and the bot computes it from the configured budget —
-`مارجین = بودجه × ریسک٪ ÷ ۱۰۰` (⚙️ تنظیمات → 💰 بودجه sets the budget). A
-typed margin that differs from the risk-implied one by more than 10 % gets a
-⚠️ notice showing both numbers, with one-tap buttons to keep the bot's
-suggestion (✅ پیشنهاد ربات) or the trader's own figure (✍️ عدد خودم).
+The 💰 margin question (budget feature): type the committed USD amount, tap
+**🧮 محاسبه خودکار** so the bot computes it from the configured budget —
+`مارجین = بودجه × ریسک٪ ÷ ۱۰۰` (⚙️ تنظیمات → 💰 بودجه sets the budget) — or
+**⏭ رد کردن** to record the trade without a margin. A typed margin that
+differs from the risk-implied one by more than 10 % gets a ⚠️ notice showing
+both numbers, with a one-tap switch to the bot's suggestion (✅ پیشنهاد ربات)
+or simply retype another figure.
 
-Because older trades were closed without a margin question, P&L for margin-less
-closes is stored as *unknown* (NULL — never a fake 0): the stats panel still
-counts them as Win/Loss/BE from the status and the price direction, and
-`/recent` shows «—» instead of a fabricated amount. When a margin **is** known,
-the close stores the real
-`P&L = price-move ÷ entry × margin × leverage` and ROI (ROI from the rounded
-P&L — matching the database; leverage comes from the questionnaire and a
-skipped question counts as 1x), previews them on the
-confirmation summary, and `/recent`, `/stats` and the Excel export show the
-actual dollar amounts. Leverage appears on every trade message — the open
-summary, the saved-trade message, the 🟢 detail card and the `/recent` detail
-card (shown as 1x when it was skipped). In `/recent` two-phase trades carry a 🔁
+The closed trade's **typed dollar result is stored as-is** and the configured
+budget moves by it — the close confirmation shows «بودجهٔ جدید». With a margin
+on the open trade, ROI = P&L ÷ margin; without one, ROI stays unknown and
+`/recent` shows «—» instead of a fabricated amount.
+
+Every close now stores the **typed dollar result** — Win ➕, Loss ➖, BE 0 —
+so `/recent`, `/stats` and the Excel export always show the real amount. ROI
+appears only when a margin was recorded (ROI = P&L ÷ margin); leverage is
+retired — the column stays in the database for legacy rows but is never asked,
+shown or exported. In `/recent` two-phase trades carry a 🔁
 mark, and their detail card shows both reasons (ورود/خروج), the entry and exit
 hours, the exit-photo count and — when exit shots exist — a
 📸 عکس‌های خروج button that re-sends them one by one. The stats panel renders
-«—» for P&L sums that only cover margin-less two-phase trades, so it can never
-crash on them. The 🗑 button on an open trade's detail deletes it (and its
-screenshots) without ever touching the history.
+«—» for selections whose trades have no P&L (legacy margin-less rows), so it
+can never crash on them. The 🗑 button on an open trade's detail deletes it
+(and its screenshots) without ever touching the history.
 
 ## Data
 
