@@ -234,20 +234,45 @@ can never crash on them. The 🗑 button on an open trade's detail deletes it
 - Double-click **`bot.bat`** (or run
   `powershell -NoProfile -ExecutionPolicy Bypass -File bot-manager.ps1`): a small
   TUI shows the live status (RUNNING/STOPPED, PID, uptime, memory, last log line)
-  and offers **Start / Stop / Restart / Live log / Clear log / Quit** with
-  arrow keys + Enter (number keys `1-6`, Esc quits).
+  and offers **Start / Stop / Restart / Live log / Clear log / Environment
+  check / Install dependencies / Quit** with arrow keys + Enter (number keys
+  `1-8`, Esc quits).
 - The bot starts as a **hidden detached process** — closing the manager window
   (or the whole terminal) does **not** stop it. Stop it from the menu, or run
   `bot-manager.ps1 -Stop`. Detection works via `bot.pid` **plus** a command-line
   scan, so manually started `python bot.py` instances are found too. The start
   watchdog watches the first seconds and prints the log tail plus likely causes
-  (missing token, another poller) if the bot dies right away.
+  (missing `.env`, missing dependencies, unreachable Telegram, another poller)
+  if the bot dies right away.
+- **Environment check** (menu item 6, or `bot-manager.ps1 -Check`) pinpoints
+  startup failures on a new PC: verifies the venv, that
+  `python-telegram-bot`/`openpyxl` are installed, that `.env` exists with a
+  real `TELEGRAM_BOT_TOKEN`, validates the token against Telegram's `getMe`
+  API (401 = wrong token), warns if `api.telegram.org` is unreachable
+  (VPN needed on some networks) and if the log shows a second poller
+  (`Conflict: terminated by other getUpdates`).
 - **One poller per token**: only ONE bot instance may poll a token. Before
   running locally, pause the Railway service (or any other deployment) —
   otherwise the instances fight over `getUpdates` and the log fills with
   `telegram.error.Conflict: terminated by other getUpdates request`.
-- Scripting switches: `-Status`, `-Start`, `-Stop`
-  (e.g. `powershell -File bot-manager.ps1 -Status`).
+- Scripting switches: `-Status`, `-Start`, `-Stop`, `-Check`,
+  `-Install` (e.g. `powershell -File bot-manager.ps1 -Status`).
+
+### First-time setup on a new PC
+
+1. Install **Python 3.10+** from python.org (tick "Add python.exe to PATH").
+2. Copy the project folder (or `git clone` it).
+3. **Copy the `.env` file from the working PC** — it is NOT in git
+   (gitignored), so a fresh clone has no token at all. It needs the line
+   `TELEGRAM_BOT_TOKEN=1234567:AA...` (real token from @BotFather).
+4. In the project folder run once: `python -m venv .venv`
+   (never copy a `.venv` folder between PCs — it hardcodes local paths).
+5. Open `bot.bat` → menu item 7 **Install / repair dependencies**
+   (`pip install -r requirements.txt`, needs internet).
+6. Run menu item 6 **Environment check** — every line should be `[OK]`.
+7. **Pause the Railway service** (or stop the bot on the other PC) —
+   one poller per token, or the second instance exits with
+   `telegram.error.Conflict`.
 
 ## Data
 
